@@ -1,0 +1,8 @@
+# compile
+*.bc
+*.ll
+*.o
+
+# output
+output
+*.txt

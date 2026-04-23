@@ -238,7 +238,9 @@ public:
 
   unsigned sentinelNOP() override;
 
+#ifdef BUILD_ASLP
   std::optional<aslp::opcode_t> getArmOpcode(const llvm::MCInst &I);
+#endif
 
   void lift(llvm::MCInst &I) override;
   void lift_add(unsigned opcode);

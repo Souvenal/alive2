@@ -227,10 +227,15 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "backend_tv/riscv2llvm.cpp"
     "backend_tv/riscv2llvm_insns.cpp"
 
+    "backend_tv/binary_reader.cpp"
+
   )
 
   add_library(llvm_util STATIC ${LLVM_UTIL_SRCS})
   add_library(backend_tv STATIC ${BACKEND_TV_SRCS})
+  if (BUILD_ASLP)
+    target_compile_definitions(backend_tv PUBLIC BUILD_ASLP)
+  endif()
   set(ALIVE_LIBS_LLVM backend_tv llvm_util ${ALIVE_LIBS})
   set(ALIVE_EXEC_LIBS_LLVM llvm_util backend_tv ${ALIVE_EXEC_LIBS})
 
@@ -242,6 +247,12 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
   add_llvm_executable(backend-tv
     "tools/backend-tv.cpp"
   )
+  target_compile_options(backend-tv PRIVATE -fexceptions)
+
+  add_llvm_executable(arm-lifter
+    "tools/arm-lifter.cpp"
+  )
+  target_compile_options(arm-lifter PRIVATE -fexceptions)
 
   add_llvm_executable(quick-fuzz
     "tools/quick-fuzz.cpp"
@@ -296,15 +307,19 @@ install(TARGETS alive alive-jobserver)
 #add_library(alive2 SHARED ${IR_SRCS} ${SMT_SRCS} ${TOOLS_SRCS} ${UTIL_SRCS} ${LLVM_UTIL_SRCS})
 
 if (BUILD_LLVM_UTILS OR BUILD_TV)
-  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils riscvasmparser riscvcodegen riscvdesc riscvdisassembler riscvinfo AllTargetsCodeGens AllTargetsDescs AllTargetsInfos
+  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils riscvasmparser riscvcodegen riscvdesc riscvdisassembler riscvinfo AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF
     )
 
-  add_subdirectory(backend_tv/aslp)
-  target_link_libraries(backend_tv PUBLIC bridge)
+  option(BUILD_ASLP "Build ASLP bridge (requires Java & antlr4)" OFF)
+  if (BUILD_ASLP)
+    add_subdirectory(backend_tv/aslp)
+    target_link_libraries(backend_tv PUBLIC bridge)
+  endif()
 
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
   target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(backend-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
+  target_link_libraries(arm-lifter PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(quick-fuzz PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   install(TARGETS alive-tv quick-fuzz alive-exec)

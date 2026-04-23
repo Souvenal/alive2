@@ -1116,24 +1116,44 @@ void arm2llvm::doCall(FunctionCallee FC, CallInst *llvmCI,
 
   bool sext{false}, zext{false};
 
-  assert(llvmCI);
-  if (llvmCI->hasFnAttr(Attribute::NoReturn)) {
+  // ORIGINAL:
+  // assert(llvmCI);
+  // if (llvmCI->hasFnAttr(Attribute::NoReturn)) {
+  
+  // llvmCI may be a dummy CallInst when there's no source-side IR
+  if (llvmCI && llvmCI->hasFnAttr(Attribute::NoReturn)) {
     auto a = CI->getAttributes();
     auto a2 = a.addFnAttribute(Ctx, Attribute::NoReturn);
     CI->setAttributes(a2);
   }
   // NB we have to check for both function attributes and call site
   // attributes
-  if (llvmCI->hasRetAttr(Attribute::SExt))
-    sext = true;
-  if (llvmCI->hasRetAttr(Attribute::ZExt))
-    zext = true;
-  auto calledFn = llvmCI->getCalledFunction();
-  if (calledFn) {
-    if (calledFn->hasRetAttribute(Attribute::SExt))
+  
+  // ORIGINAL:
+  // if (llvmCI->hasRetAttr(Attribute::SExt))
+  //   sext = true;
+  // if (llvmCI->hasRetAttr(Attribute::ZExt))
+  //   zext = true;
+  // auto calledFn = llvmCI->getCalledFunction();
+  // if (calledFn) {
+  //   if (calledFn->hasRetAttribute(Attribute::SExt))
+  //     sext = true;
+  //   if (calledFn->hasRetAttribute(Attribute::ZExt))
+  //     zext = true;
+  // }
+  
+  if (llvmCI) {
+    if (llvmCI->hasRetAttr(Attribute::SExt))
       sext = true;
-    if (calledFn->hasRetAttribute(Attribute::ZExt))
+    if (llvmCI->hasRetAttr(Attribute::ZExt))
       zext = true;
+    auto calledFn = llvmCI->getCalledFunction();
+    if (calledFn) {
+      if (calledFn->hasRetAttribute(Attribute::SExt))
+        sext = true;
+      if (calledFn->hasRetAttribute(Attribute::ZExt))
+        zext = true;
+    }
   }
 
   auto RV = enforceSExtZExt(CI, sext, zext);
@@ -3227,6 +3247,7 @@ llvm::AllocaInst *arm2llvm::get_reg(aslp::reg_t regtype, uint64_t num) {
   return llvm::cast<llvm::AllocaInst>(RegFile.at(reg));
 }
 
+#ifdef BUILD_ASLP
 optional<aslp::opcode_t> arm2llvm::getArmOpcode(const MCInst &I) {
   SmallVector<MCFixup> Fixups{};
   SmallVector<char> Code{};
@@ -3253,6 +3274,7 @@ optional<aslp::opcode_t> arm2llvm::getArmOpcode(const MCInst &I) {
   }
   return ret;
 }
+#endif
 
 void arm2llvm::platformInit() {
   auto i8 = getIntTy(8);

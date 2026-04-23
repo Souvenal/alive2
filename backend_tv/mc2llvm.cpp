@@ -263,13 +263,31 @@ pair<std::string, uint16_t> mc2llvm::MCExprToName(const MCExpr *expr) {
     *out << "raw symbol ref expr\n";
     return make_pair(demangle((string)sr->getSymbol().getName()), NO_SPECIFIER);
   }
-  auto spec = dyn_cast<MCSpecifierExpr>(expr);
-  assert(spec);
-  auto specifier = spec->getSpecifier();
-  auto var = spec->getSubExpr();
-  assert(var);
-  sr = dyn_cast<MCSymbolRefExpr>(var);
-  assert(sr);
+
+  uint16_t specifier = NO_SPECIFIER;
+  const MCExpr *inner = expr;
+
+  if (auto spec = dyn_cast<MCSpecifierExpr>(expr)) {
+    specifier = spec->getSpecifier();
+    inner = spec->getSubExpr();
+  } else if (auto bin = dyn_cast<MCBinaryExpr>(expr)) {
+    // MCBinaryExpr should not occur — arm-lifter resolves section+addend
+    // references as synthetic labels. If we get here, it's unexpected.
+    *out << "MCExprToName: unexpected MCBinaryExpr\n";
+    // Try best-effort extraction
+    if (auto s = dyn_cast<MCSpecifierExpr>(bin->getLHS())) {
+      specifier = s->getSpecifier();
+      inner = s->getSubExpr();
+    } else {
+      inner = bin->getLHS();
+    }
+  }
+
+  sr = dyn_cast<MCSymbolRefExpr>(inner);
+  if (!sr) {
+    *out << "MCExprToName: cannot extract symbol name from expression\n";
+    return make_pair("", specifier);
+  }
   return make_pair(demangle((string)sr->getSymbol().getName()), specifier);
 }
 
@@ -572,8 +590,16 @@ void mc2llvm::doDirectCall() {
       *out << "oops, debuginfo gave us something that's not a callinst\n";
   }
   if (!llvmCI) {
-    *out << "error: can't locate corresponding source-side call instruction\n";
-    exit(-1);
+    // ORIGINAL:
+    // *out << "error: can't locate corresponding source-side call instruction\n";
+    // exit(-1);
+
+    // No source-side call instruction available (e.g. arm-lifter without
+    // source IR). Proceed without attribute info from the source call.
+    *out << "warning: no source-side call instruction for direct call\n";
+    FunctionCallee FC{callee};
+    doCall(FC, nullptr, calleeName);
+    return;
   }
 
   FunctionCallee FC{callee};
@@ -668,6 +694,12 @@ pair<Function *, Function *> mc2llvm::run() {
     *out << "\nERROR: AsmParser failed\n";
     exit(-1);
   }
+
+  // Flush any remaining data from the last label in the assembly.
+  // addConstant() is called at each emitLabel, but the final label's
+  // accumulated data is never flushed because there's no subsequent
+  // emitLabel to trigger it.
+  Str->addConstant();
 
   Str->removeEmptyBlocks();
   Str->checkEntryBlock(branchInst());
