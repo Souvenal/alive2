@@ -13,6 +13,8 @@ class Function;
 class VectorType;
 } // namespace llvm
 
+class ObjectLiftContext;
+
 namespace lifter {
 
 /*
@@ -43,6 +45,22 @@ liftFunc(llvm::Function *, std::unique_ptr<llvm::MemoryBuffer>,
          std::string optimize_tgt, std::ostream *out, const llvm::Target *Targ,
          llvm::Triple DefaultTT, const char *DefaultCPU,
          const char *DefaultFeatures);
+
+/*
+ * lift textual assembly to LLVM IR, into an existing shared Module.
+ * This is the shared Module variant of liftFunc() for arm-lifter.
+ * srcFn is passed directly from src-bc (adjustSrc is skipped in
+ * this path). ObjCtx provides src-bc global variable lookup priority.
+ * Returns the lifted function pointer.
+ */
+llvm::Function *
+liftFuncToModule(llvm::Function *srcFn,
+                 std::unique_ptr<llvm::MemoryBuffer> MB,
+                 std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
+                 std::ostream *out,
+                 const llvm::Target *Targ, llvm::Triple DefaultTT,
+                 const char *DefaultCPU, const char *DefaultFeatures,
+                 llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx);
 
 /*
  * random utility function

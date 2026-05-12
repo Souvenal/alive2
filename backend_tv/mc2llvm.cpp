@@ -4,6 +4,7 @@
 
 #include "backend_tv/lifter.h"
 #include "backend_tv/mc2llvm.h"
+#include "lifter_util/object_lift_context.h"
 
 #include <regex>
 
@@ -43,6 +44,11 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
   }
 
   if (newGlobal == "__stack_chk_fail") {
+    if (ObjCtx) {
+      auto *existing = LiftedModule->getGlobalVariable("__stack_chk_fail");
+      if (existing)
+        return existing;
+    }
     return new GlobalVariable(*LiftedModule, getIntTy(8), false,
                               GlobalValue::LinkageTypes::ExternalLinkage,
                               nullptr, "__stack_chk_fail");
@@ -54,6 +60,30 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
     *out << "  yay it's me!\n";
     return liftedFn;
   }
+
+  // ★ ObjectLiftContext lookup: if we're in shared Module mode, check
+  // if the global already exists in the shared Module (e.g., imported
+  // from src-bc with complete definition). This MUST be checked before
+  // copyFunctionToTarget() to avoid LLVM auto-suffixing names (e.g.
+  // myalloc → myalloc.2) when importSrcBcGlobals already created the
+  // declaration. This takes priority over both synthetic module lookup
+  // and MCglobals (which creates truncated globals from assembly data).
+  if (ObjCtx) {
+    auto *existingGV = ObjCtx->lookupGlobal(newGlobal);
+    if (existingGV) {
+      *out << "  found global '" << newGlobal
+           << "' in shared Module (src-bc definition)\n";
+      return existingGV;
+    }
+    // Also check for function declarations in the shared Module
+    auto *existingFn = LiftedModule->getFunction(newGlobal);
+    if (existingFn) {
+      *out << "  found function '" << newGlobal
+           << "' in shared Module\n";
+      return existingFn;
+    }
+  }
+
   for (auto &f : *srcFn->getParent()) {
     auto name = f.getName();
     if (name != newGlobal)
@@ -271,10 +301,11 @@ pair<std::string, uint16_t> mc2llvm::MCExprToName(const MCExpr *expr) {
     specifier = spec->getSpecifier();
     inner = spec->getSubExpr();
   } else if (auto bin = dyn_cast<MCBinaryExpr>(expr)) {
-    // MCBinaryExpr should not occur — arm-lifter resolves section+addend
-    // references as synthetic labels. If we get here, it's unexpected.
-    *out << "MCExprToName: unexpected MCBinaryExpr\n";
-    // Try best-effort extraction
+    // MCBinaryExpr: symbol + constant addend (e.g., "maze+5").
+    // In shared Module mode, we handle addend via GEP, so extract
+    // the base symbol here. The addend is extracted separately in
+    // mapExprVar/getExprVar which call MCExprToName.
+    *out << "MCExprToName: got MCBinaryExpr (symbol + addend)\n";
     if (auto s = dyn_cast<MCSpecifierExpr>(bin->getLHS())) {
       specifier = s->getSpecifier();
       inner = s->getSubExpr();
@@ -291,10 +322,34 @@ pair<std::string, uint16_t> mc2llvm::MCExprToName(const MCExpr *expr) {
   return make_pair(demangle((string)sr->getSymbol().getName()), specifier);
 }
 
+// Extract constant addend from an MCBinaryExpr (e.g., "maze+5" → 5).
+// Returns 0 if the expression is not a binary expr or has no constant addend.
+static int64_t extractAddend(const MCExpr *expr) {
+  auto *bin = dyn_cast<MCBinaryExpr>(expr);
+  if (!bin)
+    return 0;
+
+  // Expect: SymbolRef + Constant  or  SymbolRef - Constant
+  if (bin->getOpcode() == MCBinaryExpr::Add) {
+    if (auto *ci = dyn_cast<MCConstantExpr>(bin->getRHS()))
+      return ci->getValue();
+    if (auto *ci = dyn_cast<MCConstantExpr>(bin->getLHS()))
+      return ci->getValue();
+  } else if (bin->getOpcode() == MCBinaryExpr::Sub) {
+    if (auto *ci = dyn_cast<MCConstantExpr>(bin->getRHS()))
+      return -ci->getValue();
+  }
+  return 0;
+}
+
 std::string mc2llvm::mapExprVar(const MCExpr *expr) {
   auto [name, specifier] = MCExprToName(expr);
+  int64_t addend = extractAddend(expr);
 
-  // FIXME -- we'll probably need to deal with offsets
+  // In shared Module mode with non-zero addend, we'll generate a GEP
+  // later when the ADRP result is used. For now, just resolve the base
+  // symbol and store the addend for later use.
+  (void)addend; // FIXME: store addend for GEP generation
 
   if (!lookupGlobal(name)) {
     *out << "\ncan't find global '" << name << "'\n";
@@ -308,8 +363,12 @@ std::string mc2llvm::mapExprVar(const MCExpr *expr) {
 
 pair<Value *, uint16_t> mc2llvm::getExprVar(const MCExpr *expr) {
   auto [name, specifier] = MCExprToName(expr);
+  int64_t addend = extractAddend(expr);
 
-  *out << "getExprVar = " << name << "\n";
+  *out << "getExprVar = " << name;
+  if (addend != 0)
+    *out << " + " << addend;
+  *out << "\n";
 
   Value *globalVar = lookupGlobal(name);
   if (!globalVar) {
@@ -317,34 +376,12 @@ pair<Value *, uint16_t> mc2llvm::getExprVar(const MCExpr *expr) {
     exit(-1);
   }
 
-  // FIXME?
-  long offset = 0;
-
-#if 0
-  if (specifier != NO_SPECIFIER) {
-    // Look through all visited ADRP instructions to find one in which
-    // name was the operand used.
-    bool foundStringVar = false;
-    for (const auto &exprVar : instExprVarMap) {
-      if (exprVar.second == name) {
-        foundStringVar = true;
-        break;
-      }
-    }
-    if (!foundStringVar) {
-      *out << "\nERROR: Did not use \"" << name
-           << "\" in an ADRP instruction\n\n";
-      exit(-1);
-    }
-  }
-#endif
-
-  if (offset != 0) {
-    // FIXME -- would be better to return the root symbol and the
-    // offset separately, and let the caller do the pointer
-    // arithmetic?
-    globalVar = createGEP(getIntTy(8), globalVar,
-                          {getUnsignedIntConst(offset, 64)}, "");
+  // If there's an addend, generate GEP: getelementptr i8, ptr @base, i64 addend
+  if (addend != 0) {
+    auto *offsetConst = ConstantInt::get(getIntTy(64), addend);
+    auto *baseConst = cast<Constant>(globalVar);
+    globalVar = ConstantExpr::getGetElementPtr(getIntTy(8), baseConst, offsetConst);
+    *out << "  applied addend " << addend << " via GEP\n";
   }
 
   return make_pair(globalVar, specifier);
@@ -655,12 +692,33 @@ void mc2llvm::createRegStorage(unsigned Reg, unsigned Width,
 }
 
 pair<Function *, Function *> mc2llvm::run() {
+  // arm-lifter only path: shared Module mode (ObjCtx non-null) is required.
+  // The legacy non-ObjCtx path (originally for backend-tv) is no longer
+  // supported in this fork — tools/backend-tv.cpp is not built. Bailing
+  // out here avoids partially executing the legacy code paths below.
+  if (!ObjCtx) {
+    *out << "\nERROR: mc2llvm::run() requires shared Module mode "
+            "(ObjCtx must be non-null). The legacy backend-tv path "
+            "is no longer supported in this fork.\n";
+    out->flush();
+    exit(-1);
+  }
+
   // liftedModule->setDataLayout(srcModule->getDataLayout());
   // liftedModule->setTargetTriple(srcModule->getTargetTriple());
 
   checkSupport(srcFn);
   nameGlobals(srcFn->getParent());
-  srcFn = adjustSrc(srcFn);
+  if (ObjCtx) {
+    // Shared Module mode: skip adjustSrc (no refinement check needed).
+    // Extract ABI metadata directly from srcFn without mutation.
+    auto *origRetTy = srcFn->getReturnType();
+    origRetWidth = origRetTy->isVoidTy() ? 0 : DL.getTypeSizeInBits(origRetTy);
+    has_ret_attr = srcFn->hasRetAttribute(Attribute::SExt)
+                || srcFn->hasRetAttribute(Attribute::ZExt);
+  } else {
+    srcFn = adjustSrc(srcFn);
+  }
 
   SrcMgr.AddNewSourceBuffer(std::move(MB), llvm::SMLoc());
 
@@ -708,15 +766,47 @@ pair<Function *, Function *> mc2llvm::run() {
   // we'll want this later
   vector<Type *> args{getIntTy(1)};
   FunctionType *assertTy = FunctionType::get(Type::getVoidTy(Ctx), args, false);
-  assertDecl = Function::Create(assertTy, Function::ExternalLinkage,
-                                "llvm.assert", LiftedModule);
+  // In shared Module mode, reuse existing @llvm.assert declaration to
+  // avoid LLVM auto-suffixing to @llvm.assert.5, @llvm.assert.9, etc.
+  if (ObjCtx) {
+    assertDecl = LiftedModule->getFunction("llvm.assert");
+  }
+  if (!assertDecl) {
+    assertDecl = Function::Create(assertTy, Function::ExternalLinkage,
+                                  "llvm.assert", LiftedModule);
+  }
   auto i64 = getIntTy(64);
 
-  // create a fresh function
-  liftedFn =
-      Function::Create(srcFn->getFunctionType(), GlobalValue::ExternalLinkage,
-                       0, srcFn->getName(), LiftedModule);
-  liftedFn->copyAttributesFrom(srcFn);
+  // create a fresh function (or reuse existing declaration in shared Module)
+  // In shared Module mode, importSrcBcGlobals may have already created a
+  // declaration for this function (e.g., @draw). We can't erase it because
+  // other globals may reference it. Instead, we create the new function with
+  // a temporary name, then replace all uses of the old declaration with the
+  // new definition, then erase the old one.
+  if (ObjCtx) {
+    auto *existingFn = LiftedModule->getFunction(srcFn->getName());
+    if (existingFn && existingFn->isDeclaration()) {
+      liftedFn =
+          Function::Create(srcFn->getFunctionType(),
+                           GlobalValue::ExternalLinkage, 0,
+                           srcFn->getName() + "$lifted", LiftedModule);
+      liftedFn->copyAttributesFrom(srcFn);
+      existingFn->replaceAllUsesWith(liftedFn);
+      existingFn->eraseFromParent();
+      liftedFn->setName(srcFn->getName());
+    } else {
+      liftedFn =
+          Function::Create(srcFn->getFunctionType(),
+                           GlobalValue::ExternalLinkage, 0,
+                           srcFn->getName(), LiftedModule);
+      liftedFn->copyAttributesFrom(srcFn);
+    }
+  } else {
+    liftedFn =
+        Function::Create(srcFn->getFunctionType(), GlobalValue::ExternalLinkage,
+                         0, srcFn->getName(), LiftedModule);
+    liftedFn->copyAttributesFrom(srcFn);
+  }
 
   // create LLVM-side basic blocks
   vector<pair<BasicBlock *, MCBasicBlock *>> BBs;
@@ -737,8 +827,17 @@ pair<Function *, Function *> mc2llvm::run() {
 
   auto *allocTy =
       FunctionType::get(PointerType::get(Ctx, 0), {i64, i64}, false);
-  myAlloc = Function::Create(allocTy, GlobalValue::ExternalLinkage, 0,
-                             "myalloc", LiftedModule);
+
+  // In shared Module mode, reuse existing @myalloc declaration if
+  // importSrcBcGlobals already created one. This avoids LLVM
+  // auto-suffixing to @myalloc.2, @myalloc.7, etc.
+  if (ObjCtx) {
+    myAlloc = LiftedModule->getFunction("myalloc");
+  }
+  if (!myAlloc) {
+    myAlloc = Function::Create(allocTy, GlobalValue::ExternalLinkage, 0,
+                               "myalloc", LiftedModule);
+  }
   myAllocVH = WeakTrackingVH(myAlloc);
   myAlloc->addRetAttr(Attribute::NonNull);
   AttrBuilder B1(Ctx);
@@ -801,13 +900,18 @@ pair<Function *, Function *> mc2llvm::run() {
   if (false)
     LiftedModule->dump();
 
-  std::string sss;
-  llvm::raw_string_ostream ss(sss);
-  if (llvm::verifyModule(*LiftedModule, &ss)) {
-    *out << sss << "\n\n";
-    out->flush();
-    *out << "\nERROR: Lifted module is broken, this should not happen\n";
-    exit(-1);
+  // In shared Module mode, skip verifyModule because other functions
+  // in the Module may not have been lifted yet, making the module
+  // invalid. Verification should be done once all functions are lifted.
+  if (!ObjCtx) {
+    std::string sss;
+    llvm::raw_string_ostream ss(sss);
+    if (llvm::verifyModule(*LiftedModule, &ss)) {
+      *out << sss << "\n\n";
+      out->flush();
+      *out << "\nERROR: Lifted module is broken, this should not happen\n";
+      exit(-1);
+    }
   }
 
   return make_pair(srcFn, liftedFn);
@@ -978,6 +1082,23 @@ vec_error:
   exit(-1);
 }
 
+// Helper to check if an aggregate argument type is supported.
+// Supports arrays and structs whose elements/fields are integers, pointers,
+// or recursively other supported aggregates.
+static bool isSupportedAggregateType(Type *ty) {
+  if (ty->isIntegerTy() || ty->isPointerTy())
+    return true;
+  if (auto *arrTy = dyn_cast<ArrayType>(ty))
+    return isSupportedAggregateType(arrTy->getElementType());
+  if (auto *structTy = dyn_cast<StructType>(ty)) {
+    for (unsigned i = 0; i < structTy->getNumElements(); ++i)
+      if (!isSupportedAggregateType(structTy->getElementType(i)))
+        return false;
+    return true;
+  }
+  return false;
+}
+
 void mc2llvm::checkSupport(Function *srcFn) {
   checkCallingConv(srcFn);
   if (srcFn->getLinkage() ==
@@ -1002,13 +1123,12 @@ void mc2llvm::checkSupport(Function *srcFn) {
       exit(-1);
     }
     auto *ty = arg.getType();
-    if (ty->isStructTy()) {
-      *out << "\nERROR: we don't support structures in arguments yet\n\n";
-      exit(-1);
-    }
-    if (ty->isArrayTy()) {
-      *out << "\nERROR: we don't support arrays in arguments yet\n\n";
-      exit(-1);
+    if (ty->isStructTy() || ty->isArrayTy()) {
+      if (!isSupportedAggregateType(ty)) {
+        *out << "\nERROR: unsupported aggregate argument type\n\n";
+        exit(-1);
+      }
+      continue;  // skip scalar width check for aggregates
     }
     auto &DL = srcFn->getParent()->getDataLayout();
     auto orig_width = DL.getTypeSizeInBits(ty);

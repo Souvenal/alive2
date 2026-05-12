@@ -208,7 +208,6 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
   set(BACKEND_TV_SRCS
     "backend_tv/lifter.cpp"
     "backend_tv/mc2llvm.cpp"
-    "backend_tv/run_backend.cpp"
     "backend_tv/streamerwrapper.cpp"
 
     "backend_tv/arm2llvm.cpp"
@@ -224,18 +223,18 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "backend_tv/arm2llvm_int_vec.cpp"
     "backend_tv/arm2llvm_fp_vec.cpp"
 
-    "backend_tv/riscv2llvm.cpp"
-    "backend_tv/riscv2llvm_insns.cpp"
+  )
 
-    "backend_tv/binary_reader.cpp"
-
+  set(LIFTER_UTIL_SRCS
+    "lifter_util/binary_reader.cpp"
+    "lifter_util/lifter_cleanup.cpp"
+    "lifter_util/obj2asm.cpp"
+    "lifter_util/object_lift_context.cpp"
   )
 
   add_library(llvm_util STATIC ${LLVM_UTIL_SRCS})
   add_library(backend_tv STATIC ${BACKEND_TV_SRCS})
-  if (BUILD_ASLP)
-    target_compile_definitions(backend_tv PUBLIC BUILD_ASLP)
-  endif()
+  add_library(lifter_util STATIC ${LIFTER_UTIL_SRCS})
   set(ALIVE_LIBS_LLVM backend_tv llvm_util ${ALIVE_LIBS})
   set(ALIVE_EXEC_LIBS_LLVM llvm_util backend_tv ${ALIVE_EXEC_LIBS})
 
@@ -243,11 +242,6 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "tools/alive-tv.cpp"
   )
   target_compile_options(alive-tv PRIVATE -fexceptions)
-
-  add_llvm_executable(backend-tv
-    "tools/backend-tv.cpp"
-  )
-  target_compile_options(backend-tv PRIVATE -fexceptions)
 
   add_llvm_executable(arm-lifter
     "tools/arm-lifter.cpp"
@@ -307,19 +301,12 @@ install(TARGETS alive alive-jobserver)
 #add_library(alive2 SHARED ${IR_SRCS} ${SMT_SRCS} ${TOOLS_SRCS} ${UTIL_SRCS} ${LLVM_UTIL_SRCS})
 
 if (BUILD_LLVM_UTILS OR BUILD_TV)
-  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils riscvasmparser riscvcodegen riscvdesc riscvdisassembler riscvinfo AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF
+  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils riscvasmparser riscvcodegen riscvdesc riscvdisassembler riscvinfo AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF Linker
     )
-
-  option(BUILD_ASLP "Build ASLP bridge (requires Java & antlr4)" OFF)
-  if (BUILD_ASLP)
-    add_subdirectory(backend_tv/aslp)
-    target_link_libraries(backend_tv PUBLIC bridge)
-  endif()
 
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
   target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
-  target_link_libraries(backend-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
-  target_link_libraries(arm-lifter PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
+  target_link_libraries(arm-lifter PRIVATE ${ALIVE_LIBS_LLVM} lifter_util ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(quick-fuzz PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   install(TARGETS alive-tv quick-fuzz alive-exec)
@@ -345,7 +332,7 @@ add_custom_target("check"
                  )
 
 if (BUILD_TV)
-  add_dependencies("check" "alive-tv" "backend-tv" "quick-fuzz" "tv")
+  add_dependencies("check" "alive-tv" "quick-fuzz" "tv")
 endif()
 
 # EXTERNAL_PROJECTS option that works analogous to LLVM's LLVM_EXTERNAL_PROJECTS option

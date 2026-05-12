@@ -4,7 +4,11 @@
 
 **Alive2** is a formal verification tool for LLVM compiler transformations, built on SMT (Z3) solving. This is the **arm-tv fork** which extends Alive2 with ARM (AArch64) and RISC-V backend translation validation — lifting machine code back to LLVM IR for formal equivalence checking.
 
-**Core mission of this fork**: Build `arm-lifter` — a standalone tool that lifts ARM64 assembly (from ELF object files) to LLVM IR, by borrowing and calling into `backend_tv`'s existing lifter infrastructure.
+**Core mission of this fork**: Build `arm-lifter` — a standalone tool that lifts ARM64 assembly (from ELF object files) to LLVM IR, targeting recompilation to semantically equivalent x86_64 assembly. The goal is **asm-to-asm accuracy**: the final x86_64 binary should be functionally indistinguishable from the original ARM64 binary, preserving observable behavior (returns, memory writes, side effects) at the assembly level.
+
+### Branch Policy
+
+This is a **standalone branch** (`object-lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
 
 ---
 
@@ -39,12 +43,15 @@ alive2/
 │   ├── alive-tv.cpp      # Standalone TV tool
 │   ├── alive-exec.cpp    # LLVM IR interpreter
 │   └── alive.cpp         # Alive REPL
+├── lifter_util/          # ★ arm-lifter utilities (my code)
+│   ├── binary_reader.h/cpp  # ELF reading / DWARF / symbol map
+│   ├── obj2asm.h/cpp     # ELF → assembly MemoryBuffer generation
+│   └── object_lift_context.h/cpp # Shared Module global lookup
 ├── backend_tv/           # ARM/RISC-V lifter + ASLP
-│   ├── lifter.h/cpp      # generateAsm() / liftFunc() API
+│   ├── lifter.h/cpp      # generateAsm() / liftFunc() / liftFuncToModule()
 │   ├── mc2llvm.h/cpp     # MC → LLVM core engine
 │   ├── arm2llvm.h/cpp    # ARM instruction lifter
 │   ├── arm2llvm_*.cpp    # ARM instruction categories
-│   ├── binary_reader.h/cpp # ★ ELF/Mach-O reading (my code)
 │   ├── streamerwrapper.h/cpp
 │   ├── riscv2llvm.h/cpp  # RISC-V lifter
 │   └── aslp/             # ASLp semantics bridge
@@ -59,7 +66,8 @@ alive2/
 ├── docs/                 # Implementation plans & notes
 ├── scripts/              # Helper scripts
 ├── cache/                # Redis caching (optional)
-└── llvm-project/         # Local LLVM build
+│
+├── ../llvm-project/      # Shared LLVM build (sibling directory)
 ```
 
 We only focus on `backend_tv/` and `tools/arm-lifter` for this project.
@@ -76,22 +84,25 @@ We only focus on `backend_tv/` and `tools/arm-lifter` for this project.
    ```
    C source → zig cc → ELF .o + .bc ──→ arm-lifter → LLVM IR (.ll)
                                            │
-                        .o ─┬─ disassembleTextSection()  ─┐
-                            └─ generateDataSections()   ──┤→ generateFullAsm() → liftFunc()
-                              generateBSSDeclarations() ──┘
-                        .bc ─→ function signatures + extern declarations (srcModule)
+                        .o ─┬─ Obj2Asm::convertFullAsm() ─┐
+                            │  (disassembleTextSection,   │→ AsmBuffer
+                            │   generateDataSections,     │     │
+                            │   generateBSSDeclarations) ─┘     │
+                        .bc ─→ srcFnDecl (real Function*) ─────┘
+                                                                  │
+                             SharedModule ← lifted F2
+                             (all functions in one Module, adjustSrc skipped)
    ```
 
 ### arm-lifter CLI
 
 ```
-arm-lifter <input.o> --src-bc=<input.bc> [--fn=<name>] [options]
+arm-lifter <input.o> --src-bc=<input.bc> [options]
 ```
 
 - `<input.o>`: Input AArch64 ELF `.o` file (positional, required)
 - `--src-bc=<file.bc>`: LLVM Bitcode with function signatures and extern declarations (required)
-- `--fn=<name>`: Function to lift; omit to lift all defined functions in src-bc (optional)
-- `-o / --output-dir=dir`: Output directory, files named `<basename>_<fn>.lifted.ll` (default: stdout)
+- `-o / --output-file=file`: Output file path for lifted LLVM IR (default: `<input_basename>.lifted.ll` in current directory)
 - `--optimize-tgt`: Optimization level (default O3)
 - `--run-replace-ptrtoint`: Replace `ptr→int→ptr` round trips with single GEP (default on)
 - `--show-asm`: Print symbolized assembly to stdout for debugging (default off)
@@ -104,12 +115,12 @@ arm-lifter <input.o> --src-bc=<input.bc> [--fn=<name>] [options]
 | Component | Files |
 |-----------|-------|
 | Tool entry point | `tools/arm-lifter.cpp` |
-| Binary reader / ELF support | `backend_tv/binary_reader.h/cpp` |
+| ELF → assembly utilities | `lifter_util/binary_reader.h/cpp`, `lifter_util/obj2asm.h/cpp`, `lifter_util/object_lift_context.h/cpp` |
 
 ### Borrowed from `backend_tv` (minimize modifications)
 | Component | Files | Role |
 |-----------|-------|------|
-| Lifter API | `backend_tv/lifter.h/cpp` | `liftFunc()` — parse assembly → LLVM IR |
+| Lifter API | `backend_tv/lifter.h/cpp` | `liftFunc()` / `liftFuncToModule()` — parse assembly → LLVM IR |
 | ARM instruction lifting | `backend_tv/arm2llvm.h/cpp` + `arm2llvm_*.cpp` | ARM MC → LLVM IR translation |
 | MC→LLVM core | `backend_tv/mc2llvm.h/cpp` | Core MC instruction → LLVM IR engine |
 | Streamer wrapper | `backend_tv/streamerwrapper.h/cpp` | MC streamer for instruction emission |
@@ -137,11 +148,12 @@ arm-lifter <input.o> --src-bc=<input.bc> [--fn=<name>] [options]
 - **Required flag**: `-DBUILD_TV=1` for arm-lifter / backend-tv
 - **LLVM version**: Tested with `release/22.x` branch, built with RTTI enabled
 
-### Prerequisite: Build local LLVM
+### Prerequisite: Build shared LLVM
 
-arm-lifter requires a local LLVM build with RTTI enabled. Clone into the project root (recommended):
+arm-lifter requires a local LLVM build with RTTI enabled. Clone as a **sibling directory** so multiple repos can share it:
 
 ```bash
+cd ..  # sibling of alive2/
 git clone --branch release/22.x --depth 1 https://github.com/llvm/llvm-project.git
 cd llvm-project
 cmake -B build -S llvm -G Ninja \
@@ -153,10 +165,12 @@ cmake -B build -S llvm -G Ninja \
 cmake --build build
 ```
 
-If LLVM is cloned elsewhere, set `LOCAL_LLVM` before building:
+If LLVM is elsewhere, set `LOCAL_LLVM` before building:
 ```bash
 export LOCAL_LLVM=/path/to/your/llvm-project
 ```
+
+**Why sibling?** `backend_tv/` depends on LLVM internal build artifacts (tablegen `.inc` files, `lib/Target/` private headers) that system LLVM packages don't ship. A shared sibling build eliminates redundant per-worktree LLVM builds.
 
 ### Build arm-lifter
 
@@ -179,56 +193,74 @@ cmake --build build --target arm-lifter
 ```
 
 ### Environment
-- `LOCAL_LLVM` — path to local LLVM checkout (default: `<workspace>/llvm-project`)
+- `LOCAL_LLVM` — path to shared LLVM checkout (default: `<workspace>/../llvm-project`)
 
 ---
 
 ## Testing
 
-### How to run arm-lifter tests
-```bash
-cd tests/lift
-make lift  # compiles .c → .o + .bc → runs arm-lifter
-```
+End-to-end testing runs the **reference** (`.c` → arm64 binary, native in Lima) and the **subject** (`.c` → `.o` → arm-lifter → `.ll` → x86_64 binary, via `qemu-x86_64` in Lima) and compares observable behavior.
 
-### Recompilation (verify lifted IR is valid)
-```bash
-make recompile-arm64-linux  # compile lifted .ll → AArch64 executable
-make recompile-x64-linux    # compile lifted .ll → x86_64 executable
-```
+### Lima VM topology
 
-**Makefile variables to configure**:
-- `SRC` — which `.c` file to test
-- `--fn=` parameter in `lift` target — which function to lift
+- One arm64 Ubuntu Lima VM (`lima-default`)
+- ARM64 binaries run natively: `lima -- /path/to/arm64_bin`
+- x86_64 binaries run via user-mode emulation: `lima -- qemu-x86_64 /path/to/x64_bin`
 
-### Available test cases
-| File | Content | Difficulty |
-|------|---------|-----------|
-| `Maze_novarargs.c` | Maze without varargs | Complex |
+Agents drive tests over `lima -- <cmd>`; no manual VM interaction required.
+
+### Test corpus (`tests/lift/`)
+
+Currently flat. Planned move to `tests/lift/cases/` once the pytest runner lands — see issue 12. Each case is one `.c` file; the runner discovers them automatically.
+
+Must-pass vs xfail discipline:
+- **must-pass** — the lifted binary's behavior must match the reference. CI breakage on regression.
+- **xfail** — known-broken; linked to an open issue. `strict=True` so "unexpected pass" also fails, forcing issue closure.
 
 ### Requirements for test inputs
-- Must be cross-compiled for AArch64 ELF (use `zig cc` or `clang -target aarch64-unknown-linux-gnu -c`)
-- Mach-O format is NOT supported
-- Must include DWARF debug info for function signature extraction
 
-### Adding new test cases
-1. Create `.c` file in `tests/lift/` (must be compatible with `aarch64-linux` target)
-2. Edit Makefile: `SRC=<filename>.c`
-3. Edit `--fn=` in `lift` target to specify function name
-4. Run `make lift`
+- Cross-compile to AArch64 ELF (`zig cc -target aarch64-linux` or `clang -target aarch64-unknown-linux-gnu -c`)
+- Mach-O is not supported (see issue 01)
+- A matching `.bc` must accompany the `.o` — produced from the same source with `-emit-llvm -c`. **DWARF debug info is not required.**
+
+### Single-case dev loop (current)
+
+Before the pytest runner exists, single-case Makefile workflow:
+```bash
+cd tests/lift
+# Edit Makefile: SRC=<file>.c
+make lift                    # .c → .o + .bc → .lifted.ll
+make recompile-x64-linux     # .lifted.ll → x86_64 binary
+make recompile-arm64-linux   # .lifted.ll → arm64 binary (round-trip)
+```
+
+### Adding a new test case
+
+1. Drop `<name>.c` into `tests/lift/` (or `tests/lift/cases/` once issue 12 lands)
+2. Classify: must-pass or xfail (with linked issue number)
+3. Run pytest (once available) or update `SRC=` in Makefile
 
 ---
 
 ## Known Limitations
 
-1. **Per-function isolation**: Each `liftFunc()` call creates independent `LLVMContext`/`Module`. Cross-function calls (`bl`) appear as external declarations. Merging into shared-context module requires `mc2llvm` refactoring.
-2. **ELF format required**: `mc2llvm.cpp` uses `.starts_with(".rodata")` for constant section detection. Mach-O segment names don't match.
-3. **ADRP relocation symbolization**: Basic cases (ADRP+LDR pairs) are handled, but complex GOT patterns may need further work.
-4. **Variadic functions not supported**: The lifter cannot handle variadic calls (e.g., `printf`, `sprintf`). Variadic calling conventions pass arguments on the stack in a way the lifter does not model, leading to incorrect or missing arguments. Non-variadic libc calls (e.g., `strlen`, `puts`) work correctly when `--src-bc` is provided.
-5. **`nocreateundeforpoison` attribute stripped**: LLVM 20+ intrinsic functions (e.g., `llvm.sadd.with.overflow.i32`) carry the `nocreateundeforpoison` attribute, which older LLVM versions used by `zig cc` don't recognize, causing "unterminated attribute group" parse errors. This attribute is automatically stripped from all functions before outputting the lifted `.ll` file (see `tools/arm-lifter.cpp:liftOneFunction()`, the `removeFnAttr(Attribute::NoCreateUndefOrPoison)` loop before `moduleToString()`).
-6. **ASLP code can be removed**: The ASLP (ARM Spec Language Processor) bridge code in `backend_tv/aslp/` and its integration points (`arm2llvm_insns.cpp`, `arm2llvm.h/cpp`, `mc2llvm.h`) are currently guarded by `#ifdef BUILD_ASLP` and disabled by default. The `lifter_interface_llvm` base class has been moved from `backend_tv/aslp/interface.h` to `backend_tv/interface.h` so that `mc2llvm` can compile without ASLP. Since `arm-lifter` always runs with `ASLP=false` and the ASLP server is not used, the ASLP code is dead weight. Future cleanup could remove the ASLP code entirely, along with the `bridge` library dependency and the `BUILD_ASLP` CMake option.
-7. **Lifter coupled to Alive2 verification pipeline**: `arm-lifter` links against the full Alive2 dependency chain (`ir`, `smt`, `Z3`) because `lifter::liftFunc()` internally creates alive2 IR types and may perform SMT solving (refinement checks) as part of the TV pipeline. `arm-lifter` only uses the lifted `F2` LLVM IR output and discards the source `F1`, but the verification code still executes inside `liftFunc()`. To decouple, `liftFunc()` would need to be refactored into two stages: a pure "lift" phase (MC → LLVM IR only) and a separate "verify" phase (alive2 IR construction + refinement check). This would allow `arm-lifter` to link only against `backend_tv` + `llvm_util` + `util`, dropping the `ir`/`smt`/`Z3` dependencies entirely.
-8. **Local LLVM build requirement (unconfirmed)**: The current build setup uses a locally compiled LLVM (from `llvm-project/`) as both the compiler (`clang`/`clang++`) and the CMake dependency (`CMAKE_PREFIX_PATH`). It is unclear whether a system-installed LLVM (e.g. via Homebrew `llvm` package) would work instead. Potential issues include: (a) Alive2 requires LLVM built with `LLVM_ENABLE_RTTI=ON`, which system packages may not provide; (b) version mismatches between the compiler and the linked LLVM libraries; (c) missing CMake config files in system LLVM packages. This needs further investigation — if a system LLVM with RTTI works, the local `llvm-project/` build (~30GB) could be eliminated, significantly simplifying the setup.
+Open issues are tracked in `.scratch/arm-lifter/issues/`:
+
+| # | Issue |
+|---|-------|
+| 01 | Mach-O format not supported |
+| 02 | ADRP relocation: complex GOT patterns |
+| 03 | Variadic functions not supported |
+| 04 | `nocreateundeforpoison` attribute workaround |
+| 05 | Remove dead ASLP code |
+| 06 | Drop unnecessary Alive2/Z3 linkage |
+| 07 | System LLVM support (investigate) |
+| 08 | Disassemble all executable sections |
+| 09 | Indirect calls (`blr xN`) not supported |
+
+**Aggregate arguments**: Supported since 2026-05-07 for integer/pointer element types. See `docs/changelog/2026-05-07-aggregate-args.md`.
+
+**Full feature completeness evaluation**: See [docs/feature-completeness.md](docs/feature-completeness.md).
 
 ---
 
@@ -239,5 +271,19 @@ make recompile-x64-linux    # compile lifted .ll → x86_64 executable
 - **Error handling**: Use `assert()` for invariants; `exit()` with error message for unsupported operations (following existing codebase pattern)
 - **LLVM API**: Use LLVM's raw API patterns (e.g., `new llvm::LoadInst(...)`, `llvm::ConstantInt::get(...)`)
 - **Comments**: design decisions should be documented in English
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as markdown files in `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles have default strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (neither exists yet — created lazily). See `docs/agents/domain.md`.
 
 ---

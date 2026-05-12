@@ -5,9 +5,9 @@ set -e -o pipefail
 cd "$(dirname "$0")"
 
 # ── Local LLVM path ──────────────────────────────────────
-# Default: llvm-project/ in the project root.
+# Default: llvm-project/ as a sibling directory (shared across repos).
 # Override with LOCAL_LLVM if cloned elsewhere.
-LOCAL_LLVM="${LOCAL_LLVM:-$(pwd)/llvm-project}"
+LOCAL_LLVM="${LOCAL_LLVM:-$(pwd)/../llvm-project}"
 CMAKE_PREFIX_PATH="$LOCAL_LLVM/build"
 
 # ── CMake Configure ──────────────────────────────────────

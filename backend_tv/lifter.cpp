@@ -2,6 +2,7 @@
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -20,6 +21,7 @@
 #include "backend_tv/mc2llvm.h"
 #include "backend_tv/riscv2llvm.h"
 #include "backend_tv/streamerwrapper.h"
+#include "lifter_util/object_lift_context.h"
 #include "llvm_util/llvm_optimizer.h"
 
 using namespace std;
@@ -77,6 +79,14 @@ liftFunc(Function *srcFn, unique_ptr<MemoryBuffer> MB,
          std::string optimize_tgt, std::ostream *out, const Target *Targ,
          llvm::Triple DefaultTT, const char *DefaultCPU,
          const char *DefaultFeatures) {
+  // Legacy backend-tv entry point. arm-lifter uses liftFuncToModule()
+  // instead. tools/backend-tv.cpp (the only caller of this function) is
+  // no longer built in this fork. Bail out if anything reaches here.
+  *out << "\nERROR: lifter::liftFunc() (legacy backend-tv path) is no "
+          "longer supported in this fork. Use liftFuncToModule() instead.\n";
+  out->flush();
+  exit(-1);
+
   string backend{Targ->getName()};
   unique_ptr<mc2llvm> lifter;
   if (backend == "aarch64") {
@@ -110,6 +120,54 @@ liftFunc(Function *srcFn, unique_ptr<MemoryBuffer> MB,
   *out << moduleToString(tgtModule) << std::endl;
 
   return make_pair(adjustedSrc, tgtFn);
+}
+
+Function *
+liftFuncToModule(Function *srcFn, unique_ptr<MemoryBuffer> MB,
+                 unordered_map<unsigned, Instruction *> &lineMap,
+                 ostream *out, const Target *Targ,
+                 Triple DefaultTT, const char *DefaultCPU,
+                 const char *DefaultFeatures, Module &ExternalModule,
+                 ObjectLiftContext &ObjCtx) {
+  string backend{Targ->getName()};
+  unique_ptr<mc2llvm> lifter;
+  if (backend == "aarch64") {
+    lifter = make_unique<arm2llvm>(srcFn, std::move(MB), lineMap, out, Targ,
+                                   DefaultTT, DefaultCPU, DefaultFeatures,
+                                   ExternalModule, ObjCtx);
+  } else if (backend == "riscv64") {
+    // riscv2llvm doesn't have the shared Module overload yet
+    *out << "ERROR: riscv64 not supported in shared Module mode\n";
+    exit(-1);
+  } else {
+    *out << "ERROR: Nonexistent backend\n";
+    exit(-1);
+  }
+
+  auto [adjustedSrc, tgtFn] = lifter->run();
+
+  // Shared Module path skips fixupOptimizedTgt — replace @myalloc here.
+  if (Function *myAlloc = tgtFn->getParent()->getFunction("myalloc")) {
+    std::vector<CallInst *> callSites;
+    for (auto &F : *tgtFn->getParent())
+      for (auto &BB : F)
+        for (auto &I : BB)
+          if (auto *CI = dyn_cast<CallInst>(&I))
+            if (CI->getCalledFunction() == myAlloc)
+              callSites.push_back(CI);
+    for (auto *CI : callSites) {
+      IRBuilder<> B(CI);
+      auto *alloca =
+          B.CreateAlloca(B.getInt8Ty(), 0, CI->getArgOperand(0), "stack");
+      alloca->setAlignment(Align(16));
+      CI->replaceAllUsesWith(alloca);
+      CI->eraseFromParent();
+    }
+    if (myAlloc->use_empty())
+      myAlloc->eraseFromParent();
+  }
+
+  return tgtFn;
 }
 
 } // namespace lifter

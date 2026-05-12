@@ -1,5 +1,7 @@
 #include "backend_tv/arm2llvm.h"
 
+#include "lifter_util/object_lift_context.h"
+
 #include "Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.h"
 
 const bool EXTRA_ABI_CHECKS = false;
@@ -22,6 +24,21 @@ arm2llvm::arm2llvm(Function *srcFn, unique_ptr<MemoryBuffer> MB,
                    const char *DefaultCPU, const char *DefaultFeatures)
     : mc2llvm(srcFn, std::move(MB), lineMap, out, Targ, DefaultTT, DefaultCPU,
               DefaultFeatures) {
+  // sanity checking
+  assert(disjoint(instrs_32, instrs_64));
+  assert(disjoint(instrs_32, instrs_128));
+  assert(disjoint(instrs_64, instrs_128));
+  *out << (instrs_32.size() + instrs_64.size() + instrs_128.size())
+       << " AArch64 instructions supported\n";
+}
+
+arm2llvm::arm2llvm(Function *srcFn, unique_ptr<MemoryBuffer> MB,
+                   unordered_map<unsigned, Instruction *> &lineMap,
+                   ostream *out, const Target *Targ, Triple DefaultTT,
+                   const char *DefaultCPU, const char *DefaultFeatures,
+                   Module &ExternalModule, ObjectLiftContext &ObjCtx)
+    : mc2llvm(srcFn, std::move(MB), lineMap, out, Targ, DefaultTT, DefaultCPU,
+              DefaultFeatures, ExternalModule, ObjCtx) {
   // sanity checking
   assert(disjoint(instrs_32, instrs_64));
   assert(disjoint(instrs_32, instrs_128));
@@ -1012,7 +1029,7 @@ uint64_t arm2llvm::AdvSIMDExpandImm(unsigned op, unsigned cmode,
   return imm64;
 }
 
-vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy) {
+vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy, Function *callee) {
   *out << "entering marshallArgs()\n";
   assert(fTy);
   if (fTy->getReturnType()->isStructTy()) {
@@ -1026,21 +1043,53 @@ vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy) {
   unsigned vecArgNum = 0;
   unsigned scalarArgNum = 0;
   unsigned stackSlot = 0;
+  bool hasSRet = callee && callee->arg_size() > 0 &&
+                 callee->getArg(0)->hasStructRetAttr();
   vector<Value *> args;
+  bool isFirstArg = true;
   for (auto arg = fTy->param_begin(); arg != fTy->param_end(); ++arg) {
     Type *argTy = *arg;
     assert(argTy);
     *out << "  vecArgNum = " << vecArgNum << " scalarArgNum = " << scalarArgNum
          << "\n";
-    if (argTy->isStructTy()) {
-      *out << "\nERROR: we don't support structures in arguments yet\n\n";
-      exit(-1);
-    }
-    if (argTy->isArrayTy()) {
-      *out << "\nERROR: we don't support arrays in arguments yet\n\n";
-      exit(-1);
-    }
     Value *param{nullptr};
+
+    // sret pointer is passed in X8 (AAPCS64), not in the regular arg regs
+    if (isFirstArg && hasSRet) {
+      isFirstArg = false;
+      param = readFromRegTyped(AArch64::X8, getIntTy(64));
+      param = new IntToPtrInst(param, PointerType::get(Ctx, 0), "", LLVMBB);
+      args.push_back(param);
+      continue;
+    }
+    isFirstArg = false;
+
+    if (argTy->isArrayTy() || argTy->isStructTy()) {
+      auto elements = flattenAggregate(argTy);
+      Value *agg = UndefValue::get(argTy);
+      for (auto &[eltTy, indices] : elements) {
+        Value *elt;
+        if (eltTy->isIntegerTy() || eltTy->isPointerTy()) {
+          if (scalarArgNum < 8) {
+            elt = readFromRegTyped(AArch64::X0 + scalarArgNum, getIntTy(64));
+            ++scalarArgNum;
+          } else {
+            auto SP = readPtrFromReg(AArch64::SP);
+            auto addr = createGEP(getIntTy(64), SP,
+                                  {getUnsignedIntConst(stackSlot, 64)}, nextName());
+            elt = createLoad(getIntTy(64), addr);
+            ++stackSlot;
+          }
+          elt = truncateFromI64(elt, eltTy);
+        } else {
+          *out << "\nERROR: unsupported aggregate element type in marshallArgs\n\n";
+          exit(-1);
+        }
+        agg = insertByIndices(agg, elt, indices);
+      }
+      args.push_back(agg);
+      continue;
+    }
     if (argTy->isFloatingPointTy() || argTy->isVectorTy()) {
       if (vecArgNum < 8) {
         param = readFromRegTyped(AArch64::Q0 + vecArgNum, argTy);
@@ -1101,7 +1150,8 @@ void arm2llvm::doCall(FunctionCallee FC, CallInst *llvmCI,
 
   // FIXME: invalidate argument registers before putting arguments there
 
-  auto args = marshallArgs(FC.getFunctionType());
+  auto args = marshallArgs(FC.getFunctionType(),
+                            dyn_cast_or_null<Function>(FC.getCallee()));
 
   // ugh -- these functions have an LLVM "immediate" as their last
   // argument; this is not present in the assembly at all, we have
@@ -3340,8 +3390,50 @@ void arm2llvm::platformInit() {
          << ", scalarArgNum = " << scalarArgNum
          << ", stackSlot = " << stackSlot;
     auto *argTy = arg->getType();
-    auto *val =
-        enforceSExtZExt(arg, srcArg->hasSExtAttr(), srcArg->hasZExtAttr());
+
+    // sret pointer is passed in X8 (AAPCS64), not in regular arg registers
+    if (arg->hasStructRetAttr()) {
+      createStore(&*arg, RegFile[AArch64::X8]);
+      goto end;
+    }
+
+    // enforceSExtZExt only handles scalar types; skip for aggregates
+    Value *val;
+    if (argTy->isArrayTy() || argTy->isStructTy()) {
+      val = &*arg;
+    } else {
+      val = enforceSExtZExt(arg, srcArg->hasSExtAttr(), srcArg->hasZExtAttr());
+    }
+
+    // Aggregate arguments (arrays and structs) — decompose into elements
+    if (argTy->isArrayTy() || argTy->isStructTy()) {
+      auto elements = flattenAggregate(argTy);
+      for (auto &[eltTy, indices] : elements) {
+        Value *elt = extractByIndices(val, indices);
+        if (eltTy->isIntegerTy() || eltTy->isPointerTy()) {
+          if (scalarArgNum < 8) {
+            auto Reg = AArch64::X0 + scalarArgNum;
+            createStore(extendToI64(elt), RegFile[Reg]);
+            ++scalarArgNum;
+          } else {
+            if (stackSlot >= numStackSlots) {
+              *out << "\nERROR: maximum stack slots for parameter values "
+                      "exceeded\n\n";
+              exit(-1);
+            }
+            auto addr = createGEP(i64, paramBase,
+                                  {getUnsignedIntConst(stackSlot, 64)}, "");
+            createStore(extendToI64(elt), addr);
+            ++stackSlot;
+          }
+        } else {
+          *out << "\nERROR: unsupported aggregate element type in entry "
+                  "binding\n\n";
+          exit(-1);
+        }
+      }
+      goto end;
+    }
 
     // first 8 integer parameters go in the first 8 integer registers
     if ((argTy->isIntegerTy() || argTy->isPointerTy()) && scalarArgNum < 8) {
@@ -3421,4 +3513,88 @@ void arm2llvm::checkCallingConv(Function *fn) {
         << "\nERROR: Only the C and fast calling conventions are supported\n\n";
     exit(-1);
   }
+}
+
+// Flatten an aggregate type into a list of (element_type, index_path) pairs.
+// For arrays: [N x T] -> [(T,[0]), (T,[1]), ...]
+// For structs: {T0,T1} -> [(T0,[0]), (T1,[1]), ...]
+// Nested aggregates are recursively flattened.
+vector<pair<Type *, vector<unsigned>>>
+arm2llvm::flattenAggregate(Type *ty) {
+  vector<pair<Type *, vector<unsigned>>> result;
+  if (auto *arrTy = dyn_cast<ArrayType>(ty)) {
+    auto *eltTy = arrTy->getElementType();
+    for (unsigned i = 0; i < arrTy->getNumElements(); ++i) {
+      auto sub = flattenAggregate(eltTy);
+      for (auto &p : sub) {
+        p.second.insert(p.second.begin(), i);
+        result.push_back(p);
+      }
+    }
+  } else if (auto *structTy = dyn_cast<StructType>(ty)) {
+    for (unsigned i = 0; i < structTy->getNumElements(); ++i) {
+      auto sub = flattenAggregate(structTy->getElementType(i));
+      for (auto &p : sub) {
+        p.second.insert(p.second.begin(), i);
+        result.push_back(p);
+      }
+    }
+  } else {
+    // scalar leaf
+    result.push_back({ty, {}});
+  }
+  return result;
+}
+
+// Chain ExtractValueInst with a sequence of indices.
+Value *arm2llvm::extractByIndices(Value *val,
+                                  const vector<unsigned> &indices) {
+  Value *result = val;
+  for (unsigned idx : indices) {
+    result = ExtractValueInst::Create(result, idx, "", LLVMBB);
+  }
+  return result;
+}
+
+// Chain InsertValueInst with a sequence of indices.
+Value *arm2llvm::insertByIndices(Value *agg, Value *val,
+                                 const vector<unsigned> &indices) {
+  Value *result = agg;
+  for (unsigned idx : indices) {
+    result = InsertValueInst::Create(result, val, idx, "", LLVMBB);
+  }
+  return result;
+}
+
+// Extend a scalar value to i64 for storing into an X register.
+Value *arm2llvm::extendToI64(Value *val) {
+  auto *ty = val->getType();
+  if (ty->isPointerTy()) {
+    return new PtrToIntInst(val, getIntTy(64), "", LLVMBB);
+  }
+  if (ty->isIntegerTy()) {
+    auto width = ty->getIntegerBitWidth();
+    if (width < 64) {
+      return new ZExtInst(val, getIntTy(64), "", LLVMBB);
+    }
+    return val;
+  }
+  *out << "\nERROR: extendToI64 called with unsupported type\n\n";
+  exit(-1);
+}
+
+// Truncate an i64 value read from an X register to the target type.
+Value *arm2llvm::truncateFromI64(Value *val, Type *targetTy) {
+  if (targetTy->isPointerTy()) {
+    return new IntToPtrInst(val, targetTy, "", LLVMBB);
+  }
+  if (targetTy->isIntegerTy()) {
+    auto width = targetTy->getIntegerBitWidth();
+    if (width < 64) {
+      return new TruncInst(val, targetTy, "", LLVMBB);
+    }
+    return val;
+  }
+  *out << "\nERROR: truncateFromI64 called with unsupported type\n\n";
+  exit(-1);
 }

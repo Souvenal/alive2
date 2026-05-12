@@ -24,6 +24,8 @@
 #include <cmath>
 #include <vector>
 
+class ObjectLiftContext;
+
 // avoid collisions with the upstream AArch64 namespace
 namespace llvm::AArch64 {
 const unsigned N = 100000000;
@@ -40,6 +42,13 @@ public:
            std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
            std::ostream *out, const llvm::Target *Targ, llvm::Triple DefaultTT,
            const char *DefaultCPU, const char *DefaultFeatures);
+
+  // Constructor overload for shared Module mode (arm-lifter).
+  arm2llvm(llvm::Function *srcFn, std::unique_ptr<llvm::MemoryBuffer> MB,
+           std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
+           std::ostream *out, const llvm::Target *Targ, llvm::Triple DefaultTT,
+           const char *DefaultCPU, const char *DefaultFeatures,
+           llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx);
 
   // Implemented library pseudocode for signed satuaration from A64 ISA manual
   std::tuple<llvm::Value *, bool> SignedSatQ(llvm::Value *i, unsigned bitWidth);
@@ -111,7 +120,18 @@ public:
   // imm8)
   uint64_t AdvSIMDExpandImm(unsigned op, unsigned cmode, unsigned imm8);
 
-  std::vector<llvm::Value *> marshallArgs(llvm::FunctionType *fTy);
+  std::vector<llvm::Value *> marshallArgs(llvm::FunctionType *fTy,
+                                          llvm::Function *callee = nullptr);
+
+  // Aggregate argument support helpers
+  std::vector<std::pair<llvm::Type *, std::vector<unsigned>>>
+  flattenAggregate(llvm::Type *ty);
+  llvm::Value *extractByIndices(llvm::Value *val,
+                                const std::vector<unsigned> &indices);
+  llvm::Value *insertByIndices(llvm::Value *agg, llvm::Value *val,
+                               const std::vector<unsigned> &indices);
+  llvm::Value *extendToI64(llvm::Value *val);
+  llvm::Value *truncateFromI64(llvm::Value *val, llvm::Type *targetTy);
 
   void doCall(llvm::FunctionCallee FC, llvm::CallInst *llvmCI,
               const std::string &calleeName) override;

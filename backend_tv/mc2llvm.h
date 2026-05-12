@@ -31,6 +31,8 @@
 
 #include "backend_tv/interface.h"
 
+class ObjectLiftContext;
+
 namespace lifter {
 
 class MCFunction;
@@ -77,6 +79,11 @@ public:
   llvm::WeakTrackingVH myAllocVH{nullptr};
   llvm::Constant *stackSize{nullptr};
 
+  // Shared Module mode: when non-null, lift into external Module
+  // instead of creating a new one. Provides src-bc global variable
+  // lookup priority for lazyAddGlobal().
+  ObjectLiftContext *ObjCtx{nullptr};
+
   const uint16_t NO_SPECIFIER = 0xfff;
 
   // amount of stack available for use by the lifted function, in bytes
@@ -103,6 +110,30 @@ public:
             DefaultTT, MAI.get(), MRI.get(), STI.get(), &SrcMgr, &MCOptions)},
         MCE{Targ->createMCCodeEmitter(*MCII.get(), *MCCtx.get())},
         MB{std::move(MB)}, lineMap{lineMap}, out{out} {}
+
+  // Constructor overload for shared Module mode (arm-lifter).
+  // Lifts into an external Module instead of creating a new one.
+  // srcFn is passed directly from src-bc.
+  // ObjCtx provides src-bc global variable lookup priority.
+  mc2llvm(llvm::Function *srcFn, std::unique_ptr<llvm::MemoryBuffer> MB,
+          std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
+          std::ostream *out, const llvm::Target *Targ, llvm::Triple DefaultTT,
+          const char *DefaultCPU, const char *DefaultFeatures,
+          llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx)
+      : DefaultCPU{DefaultCPU}, DefaultFeatures{DefaultFeatures},
+        DefaultTT{DefaultTT}, Targ{Targ}, LiftedModule{&ExternalModule},
+        Ctx{ExternalModule.getContext()}, srcFn{srcFn},
+        STI{Targ->createMCSubtargetInfo(DefaultTT, DefaultCPU,
+                                        DefaultFeatures)},
+        DL{ExternalModule.getDataLayout()},
+        MCII{Targ->createMCInstrInfo()}, MRI{Targ->createMCRegInfo(DefaultTT)},
+        MCOptions{llvm::mc::InitMCTargetOptionsFromFlags()},
+        MAI{Targ->createMCAsmInfo(*MRI, DefaultTT, MCOptions)},
+        MCCtx{std::make_unique<llvm::MCContext>(
+            DefaultTT, MAI.get(), MRI.get(), STI.get(), &SrcMgr, &MCOptions)},
+        MCE{Targ->createMCCodeEmitter(*MCII.get(), *MCCtx.get())},
+        MB{std::move(MB)}, lineMap{lineMap}, out{out},
+        ObjCtx{&ObjCtx} {}
 
   // these are ones that the backend adds to tgt, even when they don't
   // appear at all in src
@@ -940,6 +971,8 @@ public:
       return 128;
     } else if (ty->isPointerTy()) {
       return 64;
+    } else if (ty->isStructTy() || ty->isArrayTy()) {
+      return DL.getTypeSizeInBits(ty);
     } else {
       ty->dump();
       assert(false && "Unhandled type");

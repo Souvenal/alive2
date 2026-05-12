@@ -2,6 +2,7 @@
 *.bc
 *.ll
 *.o
+*.out
 
 # output
 output
