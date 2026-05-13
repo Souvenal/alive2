@@ -9,6 +9,7 @@
 ### Branch Policy
 
 This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
+This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
 
 ---
 
@@ -60,6 +61,8 @@ alive2/
 ├── tv/                   # Translation validation plugin
 ├── util/                 # Utilities
 ├── tests/                # Test suite
+│   ├── lift/             # arm-lifter tests (see `tests/lift/README.md`)
+│   │   └── cases/        # Test case C sources
 │   ├── lift/             # arm-lifter tests (see `tests/lift/README.md`)
 │   │   └── cases/        # Test case C sources
 │   └── arm-tv/           # ARM TV tests
@@ -118,6 +121,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | ELF → assembly utilities | `lifter_util/binary_reader.h/cpp`, `lifter_util/obj2asm.h/cpp`, `lifter_util/object_lift_context.h/cpp` |
 
 ### Shared with `backend_tv` (see ADR-0001)
+### Shared with `backend_tv` (see ADR-0001)
 | Component | Files | Role |
 |-----------|-------|------|
 | Lifter API | `backend_tv/lifter.h/cpp` | `liftFunc()` / `liftFuncToModule()` — parse assembly → LLVM IR |
@@ -126,6 +130,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | Streamer wrapper | `backend_tv/streamerwrapper.h/cpp` | MC streamer for instruction emission |
 | ASLP bridge | `backend_tv/aslp/` | ASLp semantics → LLVM IR |
 
+**Design principle**: `backend_tv/` is pruned-owned (see ADR-0001 in `docs/adr/`). Modify deliberately — prefer extending `tools/arm-lifter.cpp` or new files when adding functionality, but feel free to change `backend_tv/` when the architecture calls for it (e.g., fixing bugs, simplifying flow). Avoid gratuitous refactoring.
 **Design principle**: `backend_tv/` is pruned-owned (see ADR-0001 in `docs/adr/`). Modify deliberately — prefer extending `tools/arm-lifter.cpp` or new files when adding functionality, but feel free to change `backend_tv/` when the architecture calls for it (e.g., fixing bugs, simplifying flow). Avoid gratuitous refactoring.
 
 ### Upstream Alive2 (do not modify without reason)
@@ -147,11 +152,23 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 - **Quick**: `./build.sh` or `cmake --build build --target arm-lifter`
 - **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
 - **Full build/LLVM setup guide**: see `/build` skill
+- **Build tool**: CMake + Ninja, C++20, requires `-DBUILD_TV=1`
+- **LLVM**: `release/22.x` with RTTI, cloned as a sibling directory (`../llvm-project`)
+- **Quick**: `./build.sh` or `cmake --build build --target arm-lifter`
+- **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
+- **Full build/LLVM setup guide**: see `/build` skill
 
 ---
 
 ## Testing
 
+- **Framework**: pytest under `tests/lift/` (see `tests/lift/README.md`)
+- **Full suite**: `uv run pytest tests/lift -v`
+- **Single case**: `uv run python tests/lift/dev.py lift <case>`
+- **Must-pass** — CI regression if broken. **xfail** (strict) — known-broken, linked to an issue.
+- **Full test guide**: see `/test` skill
+
+@tests/lift/README.md
 - **Framework**: pytest under `tests/lift/` (see `tests/lift/README.md`)
 - **Full suite**: `uv run pytest tests/lift -v`
 - **Single case**: `uv run python tests/lift/dev.py lift <case>`
@@ -206,6 +223,7 @@ The five canonical roles have default strings (`needs-triage`, `needs-info`, `re
 
 ### Domain docs
 
+Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (both exist as of 2026-05). See `docs/agents/domain.md`.
 Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (both exist as of 2026-05). See `docs/agents/domain.md`.
 
 ---
