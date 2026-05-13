@@ -705,9 +705,34 @@ void arm2llvm::doIndirectCall() {
       exit(-1);
     }
   } else {
-    *out << "OOPS: no debuginfo mapping exists\n";
-    *out << "Can't process BR/BLR instruction\n\n";
-    exit(-1);
+    // arm-lifter fallback: no source-side debuginfo mapping.
+    // Search srcFn for any indirect call to borrow its function type.
+    *out << "warning: no debuginfo mapping for BR/BLR, searching source "
+            "function for indirect call signature\n";
+    FunctionType *indirectFT = nullptr;
+    for (auto &BB : *srcFn) {
+      for (auto &I : BB) {
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+          if (CI->isIndirectCall()) {
+            indirectFT = CI->getFunctionType();
+            break;
+          }
+        }
+      }
+      if (indirectFT)
+        break;
+    }
+    if (indirectFT) {
+      auto reg = CurInst->getOperand(0).getReg();
+      auto fnPtr = readPtrFromReg(reg);
+      FunctionCallee FC(indirectFT, fnPtr);
+      doCall(FC, nullptr, "");
+    } else {
+      *out << "OOPS: no debuginfo mapping exists and no indirect call "
+              "found in source function\n";
+      *out << "Can't process BR/BLR instruction\n\n";
+      exit(-1);
+    }
   }
 }
 

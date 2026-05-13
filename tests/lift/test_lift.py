@@ -24,7 +24,7 @@ CASE_MARKS = {
     "init_fini_sections": ("xfail", "arm-lifter crash on TBZW instruction with SEH_Nop"),
     "pgo_sections": ("xfail", "arm-lifter fails — PGO section / function partitioning"),
     "Maze": ("xfail", "issue 03 — variadic functions not supported"),
-    "indirect_call": ("xfail", "issue 09 — indirect calls (blr xN) not supported"),
+    "indirect_call": ("must_pass", None),
 }
 
 

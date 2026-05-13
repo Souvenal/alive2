@@ -175,7 +175,6 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 05 | Remove dead ASLP code |
 | 06 | Drop unnecessary Alive2/Z3 linkage |
 | 08 | Disassemble all executable sections |
-| 09 | Indirect calls (`blr xN`) not supported |
 | 10 | Delete remaining non-lifter code |
 | 11 | Codegen-injected runtime symbol ABI table |
 | 15 | Data segment optimization |
