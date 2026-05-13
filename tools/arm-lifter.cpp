@@ -310,6 +310,19 @@ void runLifter(ostream *out) {
         F.removeFnAttr(Attribute::NoCreateUndefOrPoison);
     }
 
+    // Strip target-specific memory location names (target_mem0, target_mem1)
+    // from the memory() attribute on all functions. These are AArch64-backend-
+    // specific memory location annotations that the x86 backend cannot parse.
+    // We need to promote target_mem locations to the aggregate value ("other")
+    // because the .ll printer only omits locations whose ModRef matches Other.
+    for (auto &F : *SharedModule) {
+        MemoryEffects ME = F.getMemoryEffects();
+        ModRefInfo OtherMR = ME.getModRef(IRMemLocation::Other);
+        MemoryEffects Cleaned = ME.getWithModRef(IRMemLocation::TargetMem0, OtherMR)
+                                  .getWithModRef(IRMemLocation::TargetMem1, OtherMR);
+        F.setMemoryEffects(Cleaned);
+    }
+
     // 9. Output the complete shared Module as a single .ll file
     auto lifted = lifter::moduleToString(SharedModule.get());
 

@@ -27,7 +27,7 @@ else:
     CC = "zig cc"
 CC_ARGS = CC.split()
 CFLAGS = os.environ.get(
-    "CFLAGS", "-target aarch64-linux -fno-sanitize=all -O0"
+    "CFLAGS", "-target aarch64-linux -fno-sanitize=all -O1"
 ).split()
 
 # Timeouts
