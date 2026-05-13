@@ -1,6 +1,0 @@
-define void @fcvt_d_wu(i32 noundef signext %a, ptr noundef %p) {
-entry:
-  %conv = uitofp i32 %a to double
-  store double %conv, ptr %p, align 8
-  ret void
-}

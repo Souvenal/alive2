@@ -19,7 +19,6 @@
 #include "backend_tv/arm2llvm.h"
 #include "backend_tv/lifter.h"
 #include "backend_tv/mc2llvm.h"
-#include "backend_tv/riscv2llvm.h"
 #include "backend_tv/streamerwrapper.h"
 #include "lifter_util/object_lift_context.h"
 #include "llvm_util/llvm_optimizer.h"
@@ -92,9 +91,6 @@ liftFunc(Function *srcFn, unique_ptr<MemoryBuffer> MB,
   if (backend == "aarch64") {
     lifter = make_unique<arm2llvm>(srcFn, std::move(MB), lineMap, out, Targ,
                                    DefaultTT, DefaultCPU, DefaultFeatures);
-  } else if (backend == "riscv64") {
-    lifter = make_unique<riscv2llvm>(srcFn, std::move(MB), lineMap, out, Targ,
-                                     DefaultTT, DefaultCPU, DefaultFeatures);
   } else {
     *out << "ERROR: Nonexistent backend\n";
     exit(-1);
@@ -135,10 +131,6 @@ liftFuncToModule(Function *srcFn, unique_ptr<MemoryBuffer> MB,
     lifter = make_unique<arm2llvm>(srcFn, std::move(MB), lineMap, out, Targ,
                                    DefaultTT, DefaultCPU, DefaultFeatures,
                                    ExternalModule, ObjCtx);
-  } else if (backend == "riscv64") {
-    // riscv2llvm doesn't have the shared Module overload yet
-    *out << "ERROR: riscv64 not supported in shared Module mode\n";
-    exit(-1);
   } else {
     *out << "ERROR: Nonexistent backend\n";
     exit(-1);

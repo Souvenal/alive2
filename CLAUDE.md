@@ -47,13 +47,12 @@ alive2/
 │   ├── binary_reader.h/cpp  # ELF reading / DWARF / symbol map
 │   ├── obj2asm.h/cpp     # ELF → assembly MemoryBuffer generation
 │   └── object_lift_context.h/cpp # Shared Module global lookup
-├── backend_tv/           # ARM/RISC-V lifter + ASLP
+├── backend_tv/           # ARM lifter + ASLP
 │   ├── lifter.h/cpp      # generateAsm() / liftFunc() / liftFuncToModule()
 │   ├── mc2llvm.h/cpp     # MC → LLVM core engine
 │   ├── arm2llvm.h/cpp    # ARM instruction lifter
 │   ├── arm2llvm_*.cpp    # ARM instruction categories
 │   ├── streamerwrapper.h/cpp
-│   ├── riscv2llvm.h/cpp  # RISC-V lifter
 │   └── aslp/             # ASLp semantics bridge
 ├── ir/                   # Alive2 core IR
 ├── smt/                  # Z3/SMT abstraction
@@ -124,7 +123,6 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | ARM instruction lifting | `backend_tv/arm2llvm.h/cpp` + `arm2llvm_*.cpp` | ARM MC → LLVM IR translation |
 | MC→LLVM core | `backend_tv/mc2llvm.h/cpp` | Core MC instruction → LLVM IR engine |
 | Streamer wrapper | `backend_tv/streamerwrapper.h/cpp` | MC streamer for instruction emission |
-| RISC-V lifting | `backend_tv/riscv2llvm.h/cpp` + `riscv2llvm_insns.cpp` | RISC-V MC → LLVM IR |
 | ASLP bridge | `backend_tv/aslp/` | ASLp semantics → LLVM IR |
 
 **Design principle**: `backend_tv/` is treated as upstream reference code. Avoid modifying it when possible; instead, build new functionality in `tools/arm-lifter.cpp` or new files. Call into `backend_tv` APIs, don't refactor them. When modifications are necessary, document them clearly.

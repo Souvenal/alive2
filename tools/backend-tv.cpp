@@ -393,20 +393,8 @@ version )EOF";
     LLVMInitializeAArch64TargetMC();
     LLVMInitializeAArch64AsmParser();
     LLVMInitializeAArch64AsmPrinter();
-  } else if (opt_backend == "riscv64") {
-    DefaultTT = llvm::Triple("riscv64-unknown-linux-gnu");
-    DefaultDL = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128";
-    DefaultCPU = "generic";
-    // +m includes zmmul
-    // +b = +zba,+zbb,+zbs
-    DefaultFeatures = "+c,+m,+b,+f,+d,+q,+zfh";
-    LLVMInitializeRISCVTargetInfo();
-    LLVMInitializeRISCVTarget();
-    LLVMInitializeRISCVTargetMC();
-    LLVMInitializeRISCVAsmParser();
-    LLVMInitializeRISCVAsmPrinter();
   } else {
-    *out << "ERROR: Only aarch64 or riscv64 are supported\n";
+    *out << "ERROR: Only aarch64 is supported\n";
     exit(-1);
   }
 

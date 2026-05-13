@@ -301,7 +301,7 @@ install(TARGETS alive alive-jobserver)
 #add_library(alive2 SHARED ${IR_SRCS} ${SMT_SRCS} ${TOOLS_SRCS} ${UTIL_SRCS} ${LLVM_UTIL_SRCS})
 
 if (BUILD_LLVM_UTILS OR BUILD_TV)
-  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils riscvasmparser riscvcodegen riscvdesc riscvdisassembler riscvinfo AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF Linker
+  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF Linker
     )
 
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
