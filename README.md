@@ -52,26 +52,17 @@ build/arm-lifter tests/lift/foo.o --src-bc=tests/lift/foo.bc --fn=main -o output
 
 ### Testing & Recompilation
 
-The `tests/lift/` directory contains a Makefile-driven workflow:
+End-to-end testing lives in `tests/lift/` and uses pytest + the `dev.py` development tool.
+See `tests/lift/README.md` for the complete workflow.
+
+Quick start:
 
 ```bash
-cd tests/lift
+# Run the test suite
+uv run pytest tests/lift -v
 
-# Step 1: Cross-compile C source → ELF .o + bitcode .bc (via zig cc)
-# Step 2: Lift all functions from .o → .ll
-make lift
-
-# Step 3: Recompile lifted .ll back into an executable
-make recompile-arm64-linux    # → output/<name>_lifted_arm64_linux (AArch64)
-make recompile-x64-linux      # → output/<name>_lifted_x64_linux   (x86_64)
-```
-
-The recompilation step compiles each `.lifted.ll` → `.lifted.o`, then links them into a runnable executable. This verifies that the lifted IR is syntactically valid and linkable. Cross-architecture recompilation (e.g. lifting ARM64 code but recompiling for x86_64) is possible because the lifted IR is target-independent LLVM IR.
-
-To test a different source file, edit `SRC` in the Makefile:
-
-```makefile
-SRC=your_file.c
+# Lift a single case and inspect the output
+uv run python tests/lift/dev.py lift maze_novarargs
 ```
 
 ### arm-lifter CLI

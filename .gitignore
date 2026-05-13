@@ -2,6 +2,7 @@
 .vscode
 build*/
 *.pyc
+.pytest_cache
 CMakeSettings.json
 temp/*
 tests/temp/*
@@ -9,3 +10,6 @@ tests/temp/*
 logs/
 commands_*.txt
 .cache
+.venv
+
+!.claude/skills/**

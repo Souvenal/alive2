@@ -8,7 +8,7 @@
 
 ### Branch Policy
 
-This is a **standalone branch** (`object-lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
+This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
 
 ---
 
@@ -60,7 +60,8 @@ alive2/
 ├── tv/                   # Translation validation plugin
 ├── util/                 # Utilities
 ├── tests/                # Test suite
-│   ├── lift/             # arm-lifter tests
+│   ├── lift/             # arm-lifter tests (see `tests/lift/README.md`)
+│   │   └── cases/        # Test case C sources
 │   └── arm-tv/           # ARM TV tests
 ├── docs/                 # Implementation plans & notes
 ├── scripts/              # Helper scripts
@@ -116,7 +117,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | Tool entry point | `tools/arm-lifter.cpp` |
 | ELF → assembly utilities | `lifter_util/binary_reader.h/cpp`, `lifter_util/obj2asm.h/cpp`, `lifter_util/object_lift_context.h/cpp` |
 
-### Borrowed from `backend_tv` (minimize modifications)
+### Shared with `backend_tv` (see ADR-0001)
 | Component | Files | Role |
 |-----------|-------|------|
 | Lifter API | `backend_tv/lifter.h/cpp` | `liftFunc()` / `liftFuncToModule()` — parse assembly → LLVM IR |
@@ -125,7 +126,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | Streamer wrapper | `backend_tv/streamerwrapper.h/cpp` | MC streamer for instruction emission |
 | ASLP bridge | `backend_tv/aslp/` | ASLp semantics → LLVM IR |
 
-**Design principle**: `backend_tv/` is treated as upstream reference code. Avoid modifying it when possible; instead, build new functionality in `tools/arm-lifter.cpp` or new files. Call into `backend_tv` APIs, don't refactor them. When modifications are necessary, document them clearly.
+**Design principle**: `backend_tv/` is pruned-owned (see ADR-0001 in `docs/adr/`). Modify deliberately — prefer extending `tools/arm-lifter.cpp` or new files when adding functionality, but feel free to change `backend_tv/` when the architecture calls for it (e.g., fixing bugs, simplifying flow). Avoid gratuitous refactoring.
 
 ### Upstream Alive2 (do not modify without reason)
 | Component | Files |
@@ -141,102 +142,23 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 
 ## Build System
 
-- **Build tool**: CMake + Ninja
-- **C++ standard**: C++20
-- **Required flag**: `-DBUILD_TV=1` for arm-lifter / backend-tv
-- **LLVM version**: Tested with `release/22.x` branch, built with RTTI enabled
-
-### Prerequisite: Build shared LLVM
-
-arm-lifter requires a local LLVM build with RTTI enabled. Clone as a **sibling directory** so multiple repos can share it:
-
-```bash
-cd ..  # sibling of alive2/
-git clone --branch release/22.x --depth 1 https://github.com/llvm/llvm-project.git
-cd llvm-project
-cmake -B build -S llvm -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_RTTI=ON \
-  -DBUILD_SHARED_LIBS=ON \
-  -DLLVM_ENABLE_ASSERTIONS=ON \
-  -DLLVM_ENABLE_PROJECTS="llvm"
-cmake --build build
-```
-
-If LLVM is elsewhere, set `LOCAL_LLVM` before building:
-```bash
-export LOCAL_LLVM=/path/to/your/llvm-project
-```
-
-**Why sibling?** `backend_tv/` depends on LLVM internal build artifacts (tablegen `.inc` files, `lib/Target/` private headers) that system LLVM packages don't ship. A shared sibling build eliminates redundant per-worktree LLVM builds.
-
-### Build arm-lifter
-
-```bash
-./build.sh
-```
-
-`build.sh` uses `LOCAL_LLVM` (default: `./llvm-project`) to set `CMAKE_PREFIX_PATH`. Pass extra CMake args via `$@`.
-
-### Manual CMake configure (alternative)
-
-```bash
-cmake -B build -S . \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.12 \
-  -DCMAKE_PREFIX_PATH=$LOCAL_LLVM/build \
-  -DBUILD_TV=1 \
-  -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target arm-lifter
-```
-
-### Environment
-- `LOCAL_LLVM` — path to shared LLVM checkout (default: `<workspace>/../llvm-project`)
+- **Build tool**: CMake + Ninja, C++20, requires `-DBUILD_TV=1`
+- **LLVM**: `release/22.x` with RTTI, cloned as a sibling directory (`../llvm-project`)
+- **Quick**: `./build.sh` or `cmake --build build --target arm-lifter`
+- **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
+- **Full build/LLVM setup guide**: see `/build` skill
 
 ---
 
 ## Testing
 
-End-to-end testing runs the **reference** (`.c` → arm64 binary, native in Lima) and the **subject** (`.c` → `.o` → arm-lifter → `.ll` → x86_64 binary, via `qemu-x86_64` in Lima) and compares observable behavior.
+- **Framework**: pytest under `tests/lift/` (see `tests/lift/README.md`)
+- **Full suite**: `uv run pytest tests/lift -v`
+- **Single case**: `uv run python tests/lift/dev.py lift <case>`
+- **Must-pass** — CI regression if broken. **xfail** (strict) — known-broken, linked to an issue.
+- **Full test guide**: see `/test` skill
 
-### Lima VM topology
-
-- One arm64 Ubuntu Lima VM (`lima-default`)
-- ARM64 binaries run natively: `lima -- /path/to/arm64_bin`
-- x86_64 binaries run via user-mode emulation: `lima -- qemu-x86_64 /path/to/x64_bin`
-
-Agents drive tests over `lima -- <cmd>`; no manual VM interaction required.
-
-### Test corpus (`tests/lift/`)
-
-Currently flat. Planned move to `tests/lift/cases/` once the pytest runner lands — see issue 12. Each case is one `.c` file; the runner discovers them automatically.
-
-Must-pass vs xfail discipline:
-- **must-pass** — the lifted binary's behavior must match the reference. CI breakage on regression.
-- **xfail** — known-broken; linked to an open issue. `strict=True` so "unexpected pass" also fails, forcing issue closure.
-
-### Requirements for test inputs
-
-- Cross-compile to AArch64 ELF (`zig cc -target aarch64-linux` or `clang -target aarch64-unknown-linux-gnu -c`)
-- Mach-O is not supported (see issue 01)
-- A matching `.bc` must accompany the `.o` — produced from the same source with `-emit-llvm -c`. **DWARF debug info is not required.**
-
-### Single-case dev loop (current)
-
-Before the pytest runner exists, single-case Makefile workflow:
-```bash
-cd tests/lift
-# Edit Makefile: SRC=<file>.c
-make lift                    # .c → .o + .bc → .lifted.ll
-make recompile-x64-linux     # .lifted.ll → x86_64 binary
-make recompile-arm64-linux   # .lifted.ll → arm64 binary (round-trip)
-```
-
-### Adding a new test case
-
-1. Drop `<name>.c` into `tests/lift/` (or `tests/lift/cases/` once issue 12 lands)
-2. Classify: must-pass or xfail (with linked issue number)
-3. Run pytest (once available) or update `SRC=` in Makefile
+@tests/lift/README.md
 
 ---
 
@@ -252,9 +174,12 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 04 | `nocreateundeforpoison` attribute workaround |
 | 05 | Remove dead ASLP code |
 | 06 | Drop unnecessary Alive2/Z3 linkage |
-| 07 | System LLVM support (investigate) |
 | 08 | Disassemble all executable sections |
 | 09 | Indirect calls (`blr xN`) not supported |
+| 10 | Delete remaining non-lifter code |
+| 11 | Codegen-injected runtime symbol ABI table |
+| 15 | Data segment optimization |
+| 16 | Must-pass corpus green |
 
 **Aggregate arguments**: Supported since 2026-05-07 for integer/pointer element types. See `docs/changelog/2026-05-07-aggregate-args.md`.
 
@@ -282,6 +207,6 @@ The five canonical roles have default strings (`needs-triage`, `needs-info`, `re
 
 ### Domain docs
 
-Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (neither exists yet — created lazily). See `docs/agents/domain.md`.
+Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (both exist as of 2026-05). See `docs/agents/domain.md`.
 
 ---
