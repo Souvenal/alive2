@@ -72,6 +72,11 @@ public:
   std::unique_ptr<llvm::MemoryBuffer> MB;
   long totalAllocas{0};
   std::unordered_map<unsigned, llvm::Instruction *> &lineMap;
+
+  // Saved source-side CallInst for variadic callees discovered during the
+  // checkInstSupport pre-pass. Used when the arm-lifter's empty lineMap
+  // prevents getCurLLVMInst() from resolving the source CallInst.
+  std::unordered_map<std::string, llvm::CallInst *> variadicCallSites;
   unsigned origRetWidth = 64;
   bool has_ret_attr = false;
   std::ostream *out;

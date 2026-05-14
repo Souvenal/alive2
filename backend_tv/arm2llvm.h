@@ -120,7 +120,8 @@ public:
   uint64_t AdvSIMDExpandImm(unsigned op, unsigned cmode, unsigned imm8);
 
   std::vector<llvm::Value *> marshallArgs(llvm::FunctionType *fTy,
-                                          llvm::Function *callee = nullptr);
+                                          llvm::Function *callee,
+                                          llvm::CallInst *llvmCI = nullptr);
 
   // Aggregate argument support helpers
   std::vector<std::pair<llvm::Type *, std::vector<unsigned>>>

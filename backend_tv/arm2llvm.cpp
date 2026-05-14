@@ -1054,7 +1054,8 @@ uint64_t arm2llvm::AdvSIMDExpandImm(unsigned op, unsigned cmode,
   return imm64;
 }
 
-vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy, Function *callee) {
+vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy, Function *callee,
+                                       CallInst *llvmCI) {
   *out << "entering marshallArgs()\n";
   assert(fTy);
   if (fTy->getReturnType()->isStructTy()) {
@@ -1158,6 +1159,97 @@ vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy, Function *callee) {
     }
     args.push_back(param);
   }
+
+  // Marshal variadic arguments from the call site.
+  // For variadic functions like printf, the FunctionType only declares
+  // fixed parameters (e.g., i32 (ptr, ...)). The actual variadic args
+  // live in the source-side CallInst. We marshal them using the same
+  // AArch64 ABI (X0-X7 for scalar/pointer, Q0-Q7 for FP/vector, stack
+  // beyond 8), continuing the counters from where fixed params left off.
+  if (fTy->isVarArg()) {
+    if (!llvmCI) {
+      *out << "warning: variadic call without source CallInst -- "
+              "marshalling fixed params only\n";
+    } else {
+      unsigned numFixedParams = fTy->getNumParams();
+      for (unsigned i = numFixedParams; i < llvmCI->arg_size(); ++i) {
+        Type *argTy = llvmCI->getArgOperand(i)->getType();
+        assert(argTy);
+        *out << "  variadic arg #" << i
+             << " vecArgNum=" << vecArgNum
+             << " scalarArgNum=" << scalarArgNum << "\n";
+        Value *param{nullptr};
+
+        if (argTy->isArrayTy() || argTy->isStructTy()) {
+          auto elements = flattenAggregate(argTy);
+          Value *agg = UndefValue::get(argTy);
+          for (auto &[eltTy, indices] : elements) {
+            Value *elt;
+            if (eltTy->isIntegerTy() || eltTy->isPointerTy()) {
+              if (scalarArgNum < 8) {
+                elt = readFromRegTyped(AArch64::X0 + scalarArgNum, getIntTy(64));
+                ++scalarArgNum;
+              } else {
+                auto SP = readPtrFromReg(AArch64::SP);
+                auto addr = createGEP(getIntTy(64), SP,
+                                      {getUnsignedIntConst(stackSlot, 64)},
+                                      nextName());
+                elt = createLoad(getIntTy(64), addr);
+                ++stackSlot;
+              }
+              elt = truncateFromI64(elt, eltTy);
+            } else {
+              *out << "\nERROR: unsupported aggregate element type in "
+                      "variadic marshallArgs\n\n";
+              exit(-1);
+            }
+            agg = insertByIndices(agg, elt, indices);
+          }
+          args.push_back(agg);
+          continue;
+        }
+        if (argTy->isFloatingPointTy() || argTy->isVectorTy()) {
+          if (vecArgNum < 8) {
+            param = readFromRegTyped(AArch64::Q0 + vecArgNum, argTy);
+            ++vecArgNum;
+          } else {
+            auto sz = getBitWidth(argTy);
+            if (sz > 64 && ((stackSlot % 2) != 0)) {
+              ++stackSlot;
+              *out << "aligning stack slot for large vector variadic param\n";
+            }
+            auto SP = readPtrFromReg(AArch64::SP);
+            auto addr = createGEP(getIntTy(64), SP,
+                                  {getUnsignedIntConst(stackSlot, 64)},
+                                  nextName());
+            param = createBitCast(createLoad(getIntTy(sz), addr), argTy);
+            ++stackSlot;
+            if (sz > 64)
+              ++stackSlot;
+          }
+        } else if (argTy->isIntegerTy() || argTy->isPointerTy()) {
+          if (scalarArgNum < 8) {
+            param = readFromRegTyped(AArch64::X0 + scalarArgNum, getIntTy(64));
+            ++scalarArgNum;
+          } else {
+            auto SP = readPtrFromReg(AArch64::SP);
+            auto addr = createGEP(getIntTy(64), SP,
+                                  {getUnsignedIntConst(stackSlot, 64)},
+                                  nextName());
+            param = createLoad(getIntTy(64), addr);
+            ++stackSlot;
+          }
+          // Don't truncate/inttoptr variadic scalar args — the source
+          // CallInst may be from a different call site with mismatched
+          // types. i64 is safe: printf reads per format string specifiers.
+        } else {
+          *out << "\nERROR: unknown variadic arg type\n\n";
+          exit(-1);
+        }
+        args.push_back(param);
+      }
+    }
+  }
   *out << "marshalled up " << args.size() << " arguments\n";
   return args;
 }
@@ -1176,7 +1268,8 @@ void arm2llvm::doCall(FunctionCallee FC, CallInst *llvmCI,
   // FIXME: invalidate argument registers before putting arguments there
 
   auto args = marshallArgs(FC.getFunctionType(),
-                            dyn_cast_or_null<Function>(FC.getCallee()));
+                            dyn_cast_or_null<Function>(FC.getCallee()),
+                            llvmCI);
 
   // ugh -- these functions have an LLVM "immediate" as their last
   // argument; this is not present in the assembly at all, we have

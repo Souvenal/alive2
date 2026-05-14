@@ -154,7 +154,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 - **Full build/LLVM setup guide**: see `/build` skill
 - **Build tool**: CMake + Ninja, C++20, requires `-DBUILD_TV=1`
 - **LLVM**: `release/22.x` with RTTI, cloned as a sibling directory (`../llvm-project`)
-- **Quick**: `./build.sh` or `cmake --build build --target arm-lifter`
+- **Quick**: `./build.sh` or `cmake --build build --config Release --target arm-lifter`
 - **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
 - **Full build/LLVM setup guide**: see `/build` skill
 
@@ -187,7 +187,6 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 |---|-------|
 | 01 | Mach-O format not supported |
 | 02 | ADRP relocation: complex GOT patterns |
-| 03 | Variadic functions not supported |
 | 04 | `nocreateundeforpoison` attribute workaround |
 | 05 | Remove dead ASLP code |
 | 06 | Drop unnecessary Alive2/Z3 linkage |
@@ -223,7 +222,6 @@ The five canonical roles have default strings (`needs-triage`, `needs-info`, `re
 
 ### Domain docs
 
-Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (both exist as of 2026-05). See `docs/agents/domain.md`.
 Single-context repo: `CONTEXT.md` + `docs/adr/` at the root (both exist as of 2026-05). See `docs/agents/domain.md`.
 
 ---

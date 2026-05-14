@@ -626,16 +626,27 @@ void mc2llvm::doDirectCall() {
     if (!llvmCI)
       *out << "oops, debuginfo gave us something that's not a callinst\n";
   }
-  if (!llvmCI) {
-    // ORIGINAL:
-    // *out << "error: can't locate corresponding source-side call instruction\n";
-    // exit(-1);
+  if (!llvmCI && callee->isVarArg()) {
+    // Try recovering the source CallInst from the checkInstSupport pre-pass.
+    // The arm-lifter tool passes an empty lineMap, so getCurLLVMInst() always
+    // returns null for external calls. variadicCallSites is populated during
+    // checkInstSupport's iteration of the source function.
+    auto it = variadicCallSites.find(calleeName);
+    if (it != variadicCallSites.end())
+      llvmCI = it->second;
+  }
 
+  if (!llvmCI) {
     // No source-side call instruction available (e.g. arm-lifter without
     // source IR). Proceed without attribute info from the source call.
-    *out << "warning: no source-side call instruction for direct call\n";
+    if (callee->isVarArg())
+      *out << "warning: variadic direct call without source CallInst -- "
+              "variadic args will not be marshalled\n";
+    else
+      *out << "warning: no source-side call instruction for direct call\n";
+
     FunctionCallee FC{callee};
-    doCall(FC, nullptr, calleeName);
+    doCall(FC, llvmCI, calleeName);
     return;
   }
 
@@ -1012,9 +1023,12 @@ void mc2llvm::checkInstSupport(Instruction &i, const DataLayout &DL,
 
       auto name = (string)callee->getName();
 
-      if (name != "llvm.fake.use" && callee->isVarArg()) {
-        *out << "\nERROR: varargs not supported\n\n";
-        exit(-1);
+      if (callee->isVarArg()) {
+        // Keep the entry with the most arguments — Maze has multiple printf
+        // calls with different arg counts; the last one may be the smallest.
+        auto it = variadicCallSites.find(name);
+        if (it == variadicCallSites.end() || ci->arg_size() > it->second->arg_size())
+          variadicCallSites[name] = ci;
       }
 
       if (name.find("llvm.memcpy.element.unordered.atomic") != string::npos) {
@@ -1041,14 +1055,7 @@ void mc2llvm::checkInstSupport(Instruction &i, const DataLayout &DL,
       // indirect call or signature mismatch
       auto co = ci->getCalledOperand();
       assert(co);
-      if (auto cf = dyn_cast<Function>(co)) {
-        if (cf->isVarArg()) {
-          *out << "\nERROR: varargs not supported\n\n";
-          exit(-1);
-        }
-      } else {
-        // FIXME -- do we need to handle this case?
-      }
+      // variadic calls handled by marshallArgs via source-side CallInst
     }
   }
 }
