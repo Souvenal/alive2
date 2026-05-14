@@ -139,6 +139,8 @@ Value *arm2llvm::enforceSExtZExt(Value *V, bool isSExt, bool isZExt) {
       targetWidth = 64;
     else
       targetWidth = 128;
+  } else if (argTy->isIntegerTy() && getBitWidth(V) > 64) {
+    targetWidth = getBitWidth(V);
   } else {
     targetWidth = 64;
   }
@@ -1149,6 +1151,29 @@ vector<Value *> arm2llvm::marshallArgs(FunctionType *fTy, Function *callee,
       }
       if (argTy->isPointerTy()) {
         param = new IntToPtrInst(param, PointerType::get(Ctx, 0), "", LLVMBB);
+      } else if (argTy->getIntegerBitWidth() == 128) {
+        // 128-bit integer on AAPCS64 is passed in two consecutive GPRs.
+        // This branch is reached when the argument was read from X# as i64
+        // (above), but the function type says i128. The additional 64 bits
+        // reside in the next register / stack slot. Read them and combine.
+        Value *hi;
+        if (scalarArgNum < 8) {
+          hi = readFromRegTyped(AArch64::X0 + scalarArgNum, getIntTy(64));
+          ++scalarArgNum;
+        } else {
+          auto SP = readPtrFromReg(AArch64::SP);
+          auto addr = createGEP(getIntTy(64), SP,
+                                {getUnsignedIntConst(stackSlot, 64)},
+                                nextName());
+          hi = createLoad(getIntTy(64), addr);
+          ++stackSlot;
+        }
+        auto *zext_param = createZExt(param, getIntTy(128));
+        auto *zext_hi = createZExt(hi, getIntTy(128));
+        auto *shifted_hi = BinaryOperator::CreateShl(
+            zext_hi, ConstantInt::get(getIntTy(128), 64), nextName(),
+            LLVMBB);
+        param = createOr(shifted_hi, zext_param);
       } else {
         assert(argTy->getIntegerBitWidth() <= 64);
         if (argTy->getIntegerBitWidth() < 64)
@@ -1336,7 +1361,15 @@ void arm2llvm::doCall(FunctionCallee FC, CallInst *llvmCI,
     invalidateReg(AArch64::X0 + reg, 64);
 
   auto retTy = FC.getFunctionType()->getReturnType();
-  if (retTy->isIntegerTy() || retTy->isPointerTy()) {
+  if (retTy->isIntegerTy() && retTy->getIntegerBitWidth() == 128) {
+    // 128-bit integer return on AAPCS64 is in X0 (lo) and X1 (hi)
+    auto *lo = createTrunc(RV, getIntTy(64));
+    auto *shifted = BinaryOperator::CreateLShr(
+        RV, ConstantInt::get(getIntTy(128), 64), nextName(), LLVMBB);
+    auto *hi = createTrunc(shifted, getIntTy(64));
+    updateReg(lo, AArch64::X0);
+    updateReg(hi, AArch64::X1);
+  } else if (retTy->isIntegerTy() || retTy->isPointerTy()) {
     updateReg(RV, AArch64::X0);
   } else if (retTy->isFloatingPointTy() || retTy->isVectorTy()) {
     updateReg(RV, AArch64::Q0);

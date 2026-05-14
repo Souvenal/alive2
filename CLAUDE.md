@@ -192,7 +192,6 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 06 | Drop unnecessary Alive2/Z3 linkage |
 | 08 | Disassemble all executable sections |
 | 10 | Delete remaining non-lifter code |
-| 11 | Codegen-injected runtime symbol ABI table |
 | 15 | Data segment optimization |
 | 16 | Must-pass corpus green |
 | 19 | Lifted globals lose source-level names, use struct types instead of arrays |

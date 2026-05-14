@@ -5,6 +5,7 @@
 #include "backend_tv/lifter.h"
 #include "backend_tv/mc2llvm.h"
 #include "lifter_util/object_lift_context.h"
+#include "lifter_util/codegen_runtime_abi.h"
 
 #include <regex>
 
@@ -195,6 +196,17 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
                                    newGlobal, LiftedModule);
       return newF;
     }
+  }
+
+  // If none of the above matched, check the known codegen-injected runtime
+  // symbols table (compiler-rt builtins, AArch64 helpers, etc.). These symbols
+  // are injected by LLVM's backend during IR→assembly lowering and do not
+  // appear in src-bc.
+  if (auto *FT = lookupRuntimeFunctionType(newGlobal, Ctx)) {
+    *out << "  creating compiler-rt function '" << newGlobal
+         << "' from ABI table\n";
+    return Function::Create(FT, GlobalValue::LinkageTypes::ExternalLinkage,
+                            newGlobal, LiftedModule);
   }
 
   *out << "ERROR: global symbol '" << newGlobal << "' not found\n";

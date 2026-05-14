@@ -227,6 +227,7 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
 
   set(LIFTER_UTIL_SRCS
     "lifter_util/binary_reader.cpp"
+    "lifter_util/codegen_runtime_abi.cpp"
     "lifter_util/lifter_cleanup.cpp"
     "lifter_util/obj2asm.cpp"
     "lifter_util/object_lift_context.cpp"
