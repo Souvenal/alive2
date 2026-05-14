@@ -120,12 +120,11 @@ buildSectionOffsetLabels(const map<uint64_t, RelocInfo> &relocMap) {
   for (auto &[offset, reloc] : relocMap) {
     if (reloc.symbolName.empty())
       continue;
-    // Create synthetic labels for ALL symbols with non-zero addends.
-    // This includes section symbols (".rodata"+0x9e) and regular symbols
-    // ("maze"+5). The lifter's mapExprVar() can only handle simple
-    // MCSymbolRefExpr, not MCBinaryExpr like "maze+5", so we replace
-    // them with synthetic labels that the lifter can resolve.
-    if (reloc.addend != 0 || reloc.symbolName.starts_with(".")) {
+    // Create synthetic labels for section symbols (".rodata"+0x9e) that
+    // have no corresponding label in the assembly output. Regular symbols
+    // with non-zero addends ("maze"+5) are instead handled via MCBinaryExpr
+    // in tryAddingSymbolicOperand(), which mc2llvm resolves via GEP.
+    if (reloc.symbolName.starts_with(".")) {
       auto key = make_pair(reloc.symbolName, (uint64_t)reloc.addend);
       if (labels.find(key) == labels.end()) {
         labels[key] = "__sec_" + to_string(idx++);
@@ -222,17 +221,26 @@ public:
       return false;
     }
 
-    // Look up synthetic label for symbol+addend.
-    // This covers both section symbols (".rodata"+0x9e) and regular
-    // symbols ("maze"+5). The lifter can only handle simple symbol
-    // references, so we always use synthetic labels for non-zero addends.
-    if (reloc.addend != 0 || reloc.symbolName.starts_with(".")) {
-      auto key = make_pair(reloc.symbolName, (uint64_t)reloc.addend);
-      auto labelIt = sectionOffsetLabels.find(key);
-      if (labelIt != sectionOffsetLabels.end()) {
-        MCSymbol *SynSym = Ctx.getOrCreateSymbol(labelIt->second);
-        BaseExpr = MCSymbolRefExpr::create(SynSym, Ctx);
+    // For section symbols: use base synth label (addend=0) as the
+    // symbol ref, then wrap in MCBinaryExpr if addend != 0. This keeps
+    // text references pointing to the base MCGlobal (contiguous data),
+    // and mc2llvm resolves the addend via GEP.
+    // For regular symbols with addend: use MCBinaryExpr directly.
+    if (reloc.symbolName.starts_with(".")) {
+      auto baseKey = make_pair(reloc.symbolName, (uint64_t)0);
+      auto baseLabelIt = sectionOffsetLabels.find(baseKey);
+      if (baseLabelIt != sectionOffsetLabels.end()) {
+        MCSymbol *BaseSym = Ctx.getOrCreateSymbol(baseLabelIt->second);
+        BaseExpr = MCSymbolRefExpr::create(BaseSym, Ctx);
       }
+      if (reloc.addend != 0) {
+        auto *AddendExpr = MCConstantExpr::create(reloc.addend, Ctx);
+        BaseExpr = MCBinaryExpr::createAdd(BaseExpr, AddendExpr, Ctx);
+      }
+    } else if (reloc.addend != 0) {
+      // Regular symbol + addend: MCBinaryExpr → mc2llvm handles via GEP
+      auto *AddendExpr = MCConstantExpr::create(reloc.addend, Ctx);
+      BaseExpr = MCBinaryExpr::createAdd(BaseExpr, AddendExpr, Ctx);
     }
 
     const MCExpr *Expr = MCSpecifierExpr::create(BaseExpr, spec, Ctx);
@@ -548,6 +556,8 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
     // Build symbol map for this section (skip section symbols — their label
     // is implicitly defined by the .section directive and emitting them again
     // causes "symbol already defined" errors)
+    // Also skip ARM mapping symbols ($a, $d, $t, $x) which mark instruction
+    // vs data boundaries for the linker but don't represent real symbols.
     map<uint64_t, string> secSymMap;
     for (SymbolRef sym : obj.symbols()) {
       auto symSecOrErr = sym.getSection();
@@ -560,6 +570,9 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
       string symName = nameOrErr2->str();
       // Skip ELF section symbols (name matches section name)
       if (symName == secName)
+        continue;
+      // Skip ARM mapping symbols
+      if (symName == "$a" || symName == "$d" || symName == "$t" || symName == "$x")
         continue;
       uint64_t symOff = *addrOrErr - sec.getAddress();
       secSymMap[symOff] = symName;
@@ -591,16 +604,18 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
     // Build sorted synthetic label offsets for this section.
     // This includes both section+addend labels (key = section name) and
     // regular symbol+addend labels (key = symbol name).
+    // Track which labels come from section symbols — these should not
+    // split the data (text references use MCBinaryExpr base+addend instead).
     set<uint64_t> synthLabelOffsets;
-    // Map: offset within section → synthetic label name
     map<uint64_t, string> synthLabelMap;
+    set<string> sectionLabels; // synth labels from section symbols
     for (auto &[key, label] : sectionOffsetLabels) {
       const string &symOrSecName = key.first;
       uint64_t addend = key.second;
       if (symOrSecName == secName) {
-        // Section symbol: synthetic label at addend offset
         synthLabelOffsets.insert(addend);
         synthLabelMap[addend] = label;
+        sectionLabels.insert(label);
       } else if (!symOrSecName.starts_with(".")) {
         // Regular symbol: find its offset in this section
         for (auto &[off, name] : secSymMap) {
@@ -624,11 +639,18 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
         P->Streamer->emitLabel(Sym);
       }
 
-      // Emit synthetic label for symbol+addend / section+addend relocations
+      // Emit synthetic label for symbol+addend / section+addend relocations.
+      // Skip section-symbol labels at non-zero offsets — these split
+      // contiguous data and break base+offset address arithmetic in the
+      // lifted IR. Text section references use MCBinaryExpr (base+addend)
+      // instead, resolved via GEP in mc2llvm::getExprVar.
       auto synthIt = synthLabelMap.find(offset);
       if (synthIt != synthLabelMap.end()) {
-        MCSymbol *Sym = P->Ctx->getOrCreateSymbol(synthIt->second);
-        P->Streamer->emitLabel(Sym);
+        bool isSectionLabel = sectionLabels.count(synthIt->second);
+        if (!isSectionLabel || offset == 0) {
+          MCSymbol *Sym = P->Ctx->getOrCreateSymbol(synthIt->second);
+          P->Streamer->emitLabel(Sym);
+        }
       }
 
       // Check for relocation at this offset
@@ -692,10 +714,13 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
           nextBreak = nextReloc->first;
       }
 
-      // Try to detect null-terminated string for .asciz
+      // Try to detect null-terminated string for .asciz.
+      // Note: we do NOT skip this for offsets with synthetic labels.
+      // A synthetic label marks where a relocation points INTO a string,
+      // which is fine — the label is already emitted above, and the string
+      // data should still be emitted contiguously through the streamer.
       if (secName.find("rodata") != string::npos &&
-          secSymMap.find(offset) == secSymMap.end() &&
-          synthLabelMap.find(offset) == synthLabelMap.end()) {
+          secSymMap.find(offset) == secSymMap.end()) {
         uint64_t strEnd = offset;
         bool isString = false;
         while (strEnd < data.size()) {
@@ -726,10 +751,12 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
             isString = false;
         }
         if (isString) {
-          // MCAsmStreamer doesn't have a direct .asciz API,
-          // so we emit it manually
-          string str(data.data() + offset, strEnd - offset);
-          *P->OS << "\t.asciz\t\"" << str << "\"\n";
+          // Emit through the streamer (not direct *P->OS write) to
+          // maintain correct ordering: P->OS is wrapped by a
+          // formatted_raw_ostream that may buffer content, and direct
+          // writes bypass the buffer, interleaving labels incorrectly.
+          P->Streamer->emitBytes(
+              StringRef(data.data() + offset, strEnd - offset + 1));
           offset = strEnd + 1;
           continue;
         }

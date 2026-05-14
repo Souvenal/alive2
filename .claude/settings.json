@@ -1,0 +1,9 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(llvm-*)",
+            "Bash(nm *)",
+            "Bash(./build/Release/arm-lifter *)"
+        ]
+    }
+}

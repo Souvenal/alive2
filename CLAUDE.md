@@ -195,6 +195,8 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 11 | Codegen-injected runtime symbol ABI table |
 | 15 | Data segment optimization |
 | 16 | Must-pass corpus green |
+| 19 | Lifted globals lose source-level names, use struct types instead of arrays |
+| 20 | All strings packed into 1–2 large globals, no individual `@.str.N` globals |
 
 **Aggregate arguments**: Supported since 2026-05-07 for integer/pointer element types. See `docs/changelog/2026-05-07-aggregate-args.md`.
 

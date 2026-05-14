@@ -300,6 +300,16 @@ pair<std::string, uint16_t> mc2llvm::MCExprToName(const MCExpr *expr) {
   if (auto spec = dyn_cast<MCSpecifierExpr>(expr)) {
     specifier = spec->getSpecifier();
     inner = spec->getSubExpr();
+    // AArch64 MC parser produces MCSpecifierExpr(MCBinaryExpr(symbol, offset))
+    // e.g., :pg_hi21:maze+5 or :lo12:maze+5
+    if (auto bin = dyn_cast<MCBinaryExpr>(inner)) {
+      if (auto s = dyn_cast<MCSpecifierExpr>(bin->getLHS())) {
+        specifier = s->getSpecifier();
+        inner = s->getSubExpr();
+      } else {
+        inner = bin->getLHS();
+      }
+    }
   } else if (auto bin = dyn_cast<MCBinaryExpr>(expr)) {
     // MCBinaryExpr: symbol + constant addend (e.g., "maze+5").
     // In shared Module mode, we handle addend via GEP, so extract
@@ -325,6 +335,9 @@ pair<std::string, uint16_t> mc2llvm::MCExprToName(const MCExpr *expr) {
 // Extract constant addend from an MCBinaryExpr (e.g., "maze+5" → 5).
 // Returns 0 if the expression is not a binary expr or has no constant addend.
 static int64_t extractAddend(const MCExpr *expr) {
+  // Unwrap MCSpecifierExpr if present (e.g., :pg_hi21:maze+5 or :lo12:maze+5)
+  if (auto spec = dyn_cast<MCSpecifierExpr>(expr))
+    expr = spec->getSubExpr();
   auto *bin = dyn_cast<MCBinaryExpr>(expr);
   if (!bin)
     return 0;

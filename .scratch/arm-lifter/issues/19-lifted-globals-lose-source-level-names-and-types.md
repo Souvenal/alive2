@@ -114,6 +114,6 @@ Non-symbol globals that don't appear in the ELF symbol table (like `__sec_N` str
 
 ## Relationship to issue #18
 
-Issue #18 covers the **correctness** problem: synthetic labels splitting strings at arbitrary boundaries, causing undefined behavior at runtime. This issue covers the **fidelity** problem: even when a global is correctly lifted (no splitting), its name, type, and linkage are unnecessarily degraded.
+Issue #18 (closed) covered the **correctness** problem: synthetic labels splitting strings at arbitrary boundaries, causing undefined behavior at runtime. The fix was applied in `2026-05-14-synthetic-labels-data-contiguity.md`. This issue covers the **fidelity** problem: even when a global is correctly lifted (no splitting), its name, type, and linkage are unnecessarily degraded.
 
-Fixing approach A (ArrayType) and D (stack_chk_guard) is independent of #18. Approaches B and C (name recovery) should be done after #18 is fixed to avoid wiring up names to incorrectly-split globals.
+Fixing approach A (ArrayType) and D (stack_chk_guard) is independent of #18. Approaches B and C (name recovery) were enabled by the #18 fix and can proceed.
