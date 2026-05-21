@@ -1,6 +1,6 @@
 # 类型不匹配导致 SP/FP/Q0 逃逸 mem2reg，残存 ~3× 指令膨胀
 
-Status: `needs-triage`
+Status: `ready-for-agent`
 
 ## 问题
 
@@ -59,13 +59,27 @@ store i128 %result, ptr %Q0            ; 写完整 128 位
 %vec = load <2 x i64>, ptr %Q0        ; 读为向量（提取 lane）
 ```
 
-## 量化数据（Maze_novarargs, 6 函数）
+## 量化数据
+
+### Maze_novarargs（6 函数）
 
 | 阶段 | 指令数 | 膨胀比 |
 |------|--------|--------|
 | 原始 ARM64 `.o` | 428 | 1× |
 | 当前 lifted → ARM64 | 1325 | **3.1×** |
 | `opt -O2` 后 | 1277 | 3.0× |
+
+### matmul（3 函数：main, matmul, checksum）
+
+新增 compute-intensive benchmark，验证 cleanup pipeline 增强的效果：
+
+| 阶段 | 指令数 | 膨胀比 |
+|------|--------|--------|
+| 原始 ARM64 `.o` | 255 | 1× |
+| 当前 lifted → ARM64 | 536 | **2.1×** |
+| cleanup + `instcombine` | 536 | 2.1× |
+
+**关键发现**：在 `lifter_cleanup.cpp` 的 pipeline 中增补 `instcombine` 对 matmul 的指令数**零改善**（536 → 536）。这与 Maze 数据一致 —— `opt -O2` 对 lifted IR 几乎无效。根因是 SP/FP/Q0 的类型混用 alloca 在 `mem2reg` 阶段就逃逸了，后续 passes 无法触及残存的 load/store 序列。
 
 1280 字节的模拟栈（`stack1`）每次函数调用都分配，即使实际栈帧很小。
 SP/FP/Q0 的冗余 load/store 构成剩余膨胀的主体。
@@ -100,11 +114,13 @@ function(mem2reg, instcombine, dce, simplifycfg), globaldce
 `instcombine` 可以消除一部分 `ptrtoint`/`load`/`store` 序列，
 但无法根治类型混用的 alloca——因为 mem2reg 在第一关就跳过了它们。
 
-推荐方案 A，因为方案 B 治标不治本。
+**2026-05-21 验证**：新增 `matmul` benchmark 并实测在 cleanup pipeline 中加入 `instcombine`，指令数 536 → 536（零改善）。Maze 数据（`opt -O2` 仅减少 3.6%）与 matmul 数据一致证明：**方案 B 治标不治本，且事实上几乎无效。推荐方案 A。**
 
 ## 相关文件
 
-- `lifter_util/lifter_cleanup.cpp` — 现有 cleanup pipeline
+- `lifter_util/lifter_cleanup.cpp` — 现有 cleanup pipeline（注释含 `instcombine`，实际 pipeline 字符串遗漏）
 - `backend_tv/arm2llvm.cpp` — SP/FP/Q0 的寄存器读写代码
 - `backend_tv/mc2llvm.h/cpp` — 寄存器 alloca 的创建
 - `tests/lift/experiments/instruction-count-comparison/` — 复现脚本和数据
+- `tests/lift/cases/matmul.c` — 新增 compute-intensive benchmark
+- `tests/lift/test_lift.py` — test case 注册

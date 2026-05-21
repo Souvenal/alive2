@@ -28,6 +28,7 @@ CASE_MARKS = {
     "indirect_call": ("must_pass", None),
     "printf_minimal": ("must_pass", None),
     "printf_complex": ("must_pass", None),
+    "matmul": ("must_pass", None),
 }
 
 
