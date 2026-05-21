@@ -21,6 +21,7 @@ IS_LINUX = sys.platform == "linux"
 ARM_LIFTER = os.environ.get(
     "ARM_LIFTER", str(PROJECT_ROOT / "build/Release/arm-lifter")
 )
+LLVM_DIS = os.environ.get("LLVM_DIS", "llvm-dis")
 if IS_LINUX:
     CC = os.environ.get("CC", "gcc")
 else:

@@ -3,7 +3,7 @@
 
 Usage:
     uv run python tests/lift/dev.py lift <case>              .c → output/<case>.lifted.ll
-    uv run python tests/lift/dev.py full <case>              .c → lift + x86_64 bin + arm64 ref
+    uv run python tests/lift/dev.py full <case>              .c → .ll + lift + x86_64 bin + arm64 ref
     uv run python tests/lift/dev.py run <case> <kind>        run existing binary
       kind: arm64 | lifted_x64
     uv run python tests/lift/dev.py clean                    rm -r output/
@@ -20,9 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
+    LLVM_DIS,
     compile_arm64_binary,
     compile_bc_and_o,
     get_stdin,
+    run_command,
     recompile_x86_64,
     run_aarch64_linux_binary,
     run_x86_64_linux_binary,
@@ -91,6 +93,14 @@ def cmd_full(name: str, outdir: Path) -> None:
     src = _check_case(name)
     _clean_case(name, outdir)
     bc, o = compile_bc_and_o(src, outdir)
+
+    # Disassemble .bc → .ll (source IR for comparison)
+    src_ll = outdir / f"{name}.ll"
+    r = subprocess.run([LLVM_DIS, str(bc), "-o", str(src_ll)])
+    if r.returncode != 0:
+        print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
+        sys.exit(r.returncode)
+
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
 
@@ -101,6 +111,7 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     sub = recompile_x86_64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir)
+    print(f"source IR → {src_ll}")
     print(f"x86_64    → {sub}")
     print(f"arm64 ref → {ref}")
     print(f"lift      → {lifted_ll}")

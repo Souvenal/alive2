@@ -58,7 +58,7 @@ It shares the same pipeline functions as the test suite.
 # Lift a single case → output/<case>.lifted.ll + output/<case>.lift.log
 uv run python tests/lift/dev.py lift minirepro
 
-# Full pipeline → lift + recompile to x86_64 + reference ARM64 binary
+# Full pipeline → disassemble source IR + lift + recompile to x86_64 + reference ARM64 binary
 uv run python tests/lift/dev.py full minirepro
 
 # Run an already-built binary in the test VM
