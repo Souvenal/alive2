@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
+    CC_ARGS,
+    CFLAGS,
     LLVM_DIS,
     compile_arm64_binary,
     compile_bc_and_o,
@@ -101,6 +103,15 @@ def cmd_full(name: str, outdir: Path) -> None:
         print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
         sys.exit(r.returncode)
 
+    # Recompile without debug info → .nodbg.ll (for clean comparison with lifted IR)
+    nodbg_ll = outdir / f"{name}.nodbg.ll"
+    r = subprocess.run(
+        CC_ARGS + CFLAGS + ["-g0", "-S", "-emit-llvm", str(src), "-o", str(nodbg_ll)]
+    )
+    if r.returncode != 0:
+        print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
+        sys.exit(r.returncode)
+
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
 
@@ -111,7 +122,8 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     sub = recompile_x86_64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir)
-    print(f"source IR → {src_ll}")
+    print(f"source IR (with dbg) → {src_ll}")
+    print(f"source IR (no dbg)    → {nodbg_ll}")
     print(f"x86_64    → {sub}")
     print(f"arm64 ref → {ref}")
     print(f"lift      → {lifted_ll}")

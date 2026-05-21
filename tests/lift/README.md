@@ -54,19 +54,22 @@ Current cases:
 `dev.py` is the ad-hoc tool for inspecting lift results without running the full test pipeline.
 It shares the same pipeline functions as the test suite.
 
+All dev.py commands should be run from `tests/lift/` so output lands in
+`tests/lift/output/` (easier than navigating the project root):
+
 ```bash
-# Lift a single case → output/<case>.lifted.ll + output/<case>.lift.log
-uv run python tests/lift/dev.py lift minirepro
+cd tests/lift
+uv run python dev.py lift minirepro
+uv run python dev.py full minirepro
+```
 
-# Full pipeline → disassemble source IR + lift + recompile to x86_64 + reference ARM64 binary
-uv run python tests/lift/dev.py full minirepro
+`dev.py full` also produces `<case>.nodbg.ll` — source IR compiled with `-g0`
+(no debug metadata). Compare its instruction count against the lifted IR:
 
-# Run an already-built binary in the test VM
-uv run python tests/lift/dev.py run maze_novarargs arm64       # reference ARM64
-uv run python tests/lift/dev.py run minirepro lifted_x64        # recompiled x86_64
-
-# Clean output directory
-uv run python tests/lift/dev.py clean
+```bash
+# Instruction count comparison (nodbg vs lifted)
+grep -c '^  ' output/minirepro.nodbg.ll    # source baseline
+grep -c '^  ' output/minirepro.lifted.ll   # lifted target (goal: approach nodbg)
 ```
 
 Output directory (`output/` by default):
@@ -75,16 +78,23 @@ Output directory (`output/` by default):
 output/
 ├── minirepro.bc               # bitcode
 ├── minirepro.o                # compiled object
+├── minirepro.nodbg.ll         # source IR, no debug info (comparison baseline)
+├── minirepro.ll               # source IR, with dbg info
 ├── minirepro.lifted.ll        # lifted IR (inspect this)
 ├── minirepro.lift.log         # arm-lifter stdout/stderr (instruction-level debug)
 ├── minirepro.lifted_x86_64    # x86_64 binary (re-ran from lifted IR)
 └── minirepro_arm64            # ARM64 reference binary (compiled from original .c)
 ```
 
+**Primary goal**: lifted IR instruction count must approach `*.nodbg.ll`.
+Every instruction in the lifted IR that doesn't appear in the nodbg baseline is
+bloat from Issue 21 (register-alloca modeling).
+
 Custom output directory:
 
 ```bash
-uv run python tests/lift/dev.py -o /tmp/out lift maze_novarargs
+cd tests/lift
+uv run python dev.py -o /tmp/out lift maze_novarargs
 ```
 
 ## Adding a new test case

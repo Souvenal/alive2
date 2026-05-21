@@ -163,15 +163,14 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 ## Testing
 
 - **Framework**: pytest under `tests/lift/` (see `tests/lift/README.md`)
-- **Full suite**: `uv run pytest tests/lift -v`
-- **Single case**: `uv run python tests/lift/dev.py lift <case>`
-- **Must-pass** — CI regression if broken. **xfail** (strict) — known-broken, linked to an issue.
-- **Full test guide**: see `/test` skill
-
-@tests/lift/README.md
-- **Framework**: pytest under `tests/lift/` (see `tests/lift/README.md`)
-- **Full suite**: `uv run pytest tests/lift -v`
-- **Single case**: `uv run python tests/lift/dev.py lift <case>`
+- **Run from `tests/lift/`** — cd there first so output lands in `tests/lift/output/`:
+  - `cd tests/lift && uv run pytest -v` (full suite)
+  - `cd tests/lift && uv run python dev.py lift <case>` (ad-hoc lift)
+  - `cd tests/lift && uv run python dev.py full <case>` (full pipeline + `.nodbg.ll`)
+- **Primary goal**: lifted IR instruction count must approach `<case>.nodbg.ll`
+  (source IR compiled with `-g0`, no debug metadata). `dev.py full` produces both
+  `.lifted.ll` and `.nodbg.ll` for side-by-side comparison — `.nodbg.ll` is the
+  instruction-count target that defines Issue 21 done.
 - **Must-pass** — CI regression if broken. **xfail** (strict) — known-broken, linked to an issue.
 - **Full test guide**: see `/test` skill
 
@@ -197,6 +196,7 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 19 | Lifted globals lose source-level names, use struct types instead of arrays |
 | 20 | All strings packed into 1–2 large globals, no individual `@.str.N` globals |
 | 21 | Register-alloca modeling causes ~3× instruction bloat |
+| 24 | ptrtoint/inttoptr roundtrips + manual vector decomposition cause remaining ~3× gap vs nodbg |
 
 **Aggregate arguments**: Supported since 2026-05-07 for integer/pointer element types. See `docs/changelog/2026-05-07-aggregate-args.md`.
 

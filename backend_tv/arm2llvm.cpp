@@ -1691,12 +1691,26 @@ Value *arm2llvm::readFromRegOld(unsigned Reg) {
 
 Value *arm2llvm::readFromRegTyped(unsigned Reg, Type *ty) {
   auto RegAddr = dealiasReg(Reg);
-  return createLoad(ty, RegAddr);
+  auto backingSize = getRegSize(mapRegToBackingReg(Reg));
+
+  if (ty->isIntegerTy()) {
+    auto intVal = createLoad(getIntTy(backingSize), RegAddr);
+    if (ty->getIntegerBitWidth() < backingSize)
+      return createTrunc(intVal, ty);
+    return intVal;
+  }
+
+  auto intVal = createLoad(getIntTy(backingSize), RegAddr);
+  if (ty->isPointerTy())
+    return new IntToPtrInst(intVal, ty, "", LLVMBB);
+  return createBitCast(intVal, ty);
 }
 
 Value *arm2llvm::readPtrFromReg(unsigned Reg) {
   auto RegAddr = dealiasReg(Reg);
-  return createLoad(PointerType::get(Ctx, 0), RegAddr);
+  auto backingSize = getRegSize(mapRegToBackingReg(Reg));
+  auto intVal = createLoad(getIntTy(backingSize), RegAddr);
+  return new IntToPtrInst(intVal, PointerType::get(Ctx, 0), "", LLVMBB);
 }
 
 void arm2llvm::updateReg(Value *V, uint64_t reg, bool SExt) {
@@ -3503,7 +3517,7 @@ void arm2llvm::platformInit() {
   // case
   auto paramBase =
       createGEP(i8, stackMem, {getUnsignedIntConst(stackBytes, 64)}, "");
-  createStore(paramBase, RegFile[AArch64::SP]);
+  createStore(createPtrToInt(paramBase, getIntTy(64)), RegFile[AArch64::SP]);
   initialSP = readFromRegOld(AArch64::SP);
 
   // FP is X29; we'll initialize it later
@@ -3544,7 +3558,8 @@ void arm2llvm::platformInit() {
 
     // sret pointer is passed in X8 (AAPCS64), not in regular arg registers
     if (arg->hasStructRetAttr()) {
-      createStore(&*arg, RegFile[AArch64::X8]);
+      createStore(createPtrToInt(&*arg, getIntTy(64)),
+                  RegFile[AArch64::X8]);
       goto end;
     }
 
@@ -3589,7 +3604,7 @@ void arm2llvm::platformInit() {
     // first 8 integer parameters go in the first 8 integer registers
     if ((argTy->isIntegerTy() || argTy->isPointerTy()) && scalarArgNum < 8) {
       auto Reg = AArch64::X0 + scalarArgNum;
-      createStore(val, RegFile[Reg]);
+      createStore(extendToI64(val), RegFile[Reg]);
       ++scalarArgNum;
       goto end;
     }
@@ -3597,7 +3612,7 @@ void arm2llvm::platformInit() {
     // first 8 vector/FP parameters go in the first 8 vector registers
     if ((argTy->isVectorTy() || argTy->isFloatingPointTy()) && vecArgNum < 8) {
       auto Reg = AArch64::Q0 + vecArgNum;
-      createStore(val, RegFile[Reg]);
+      createStore(createBitCast(val, getIntTy(128)), RegFile[Reg]);
       ++vecArgNum;
       goto end;
     }
@@ -3638,7 +3653,7 @@ void arm2llvm::platformInit() {
   // initialize the frame pointer
   auto initFP =
       createGEP(i64, paramBase, {getUnsignedIntConst(stackSlot, 64)}, "");
-  createStore(initFP, RegFile[AArch64::FP]);
+  createStore(createPtrToInt(initFP, getIntTy(64)), RegFile[AArch64::FP]);
 }
 
 void arm2llvm::checkArgSupport(Argument &arg) {}
