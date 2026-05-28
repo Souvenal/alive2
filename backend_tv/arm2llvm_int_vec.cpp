@@ -219,12 +219,7 @@ void arm2llvm::lift_unary_vec(unsigned opcode) {
   case AArch64::ADDVv8i8v:
   case AArch64::ADDVv4i16v: {
     auto src_vector = createBitCast(src, vTy);
-    Value *sum = getUnsignedIntConst(0, eltSize);
-    for (unsigned i = 0; i < numElts; ++i) {
-      auto elt = createExtractElement(src_vector, i);
-      sum = createAdd(sum, elt);
-    }
-    // sum goes into the bottom lane, all others are zeroed out
+    auto sum = createVectorReduceAdd(src_vector);
     auto zero = getZeroIntVec(numElts, eltSize);
     auto res = createInsertElement(zero, sum, 0);
     updateOutputReg(res);
@@ -302,13 +297,10 @@ void arm2llvm::lift_unary_vec(unsigned opcode) {
         opcode == AArch64::SADDLVv4i16v || opcode == AArch64::SADDLVv8i16v ||
         opcode == AArch64::SADDLVv4i32v;
     auto src_vector = createBitCast(src, vTy);
-    auto bigTy = getIntTy(2 * eltSize);
-    Value *sum = getUnsignedIntConst(0, 2 * eltSize);
-    for (unsigned i = 0; i < numElts; ++i) {
-      auto elt = createExtractElement(src_vector, i);
-      auto ext = isSigned ? createSExt(elt, bigTy) : createZExt(elt, bigTy);
-      sum = createAdd(sum, ext);
-    }
+    auto wideTy = getVecTy(2 * eltSize, numElts);
+    auto wide_vec =
+        isSigned ? createSExt(src_vector, wideTy) : createZExt(src_vector, wideTy);
+    auto sum = createVectorReduceAdd(wide_vec);
     updateOutputReg(sum);
     break;
   }
