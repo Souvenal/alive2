@@ -32,6 +32,7 @@ from conftest import (
     run_aarch64_linux_binary,
     run_x86_64_linux_binary,
 )
+from test_lift import CASE_MARKS
 
 
 def _require_arm_lifter() -> None:
@@ -52,6 +53,12 @@ def _check_case(name: str) -> Path:
     if not src.exists():
         sys.exit(f"case '{name}' not found at {src}")
     return src
+
+
+def _extra_cflags(name: str) -> list[str]:
+    """Return per-case extra CFLAGS from CASE_MARKS, or [] if none."""
+    _, _, extra = CASE_MARKS.get(name, ("must_pass", None, []))
+    return extra
 
 
 def _outdir(base: Path | None) -> Path:
@@ -78,7 +85,7 @@ def cmd_lift(name: str, outdir: Path) -> None:
     _require_arm_lifter()
     src = _check_case(name)
     _clean_case(name, outdir)
-    bc, o = compile_bc_and_o(src, outdir)
+    bc, o = compile_bc_and_o(src, outdir, extra_cflags=_extra_cflags(name))
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
 
@@ -95,7 +102,8 @@ def cmd_full(name: str, outdir: Path) -> None:
     _require_arm_lifter()
     src = _check_case(name)
     _clean_case(name, outdir)
-    bc, o = compile_bc_and_o(src, outdir)
+    xcflags = _extra_cflags(name)
+    bc, o = compile_bc_and_o(src, outdir, extra_cflags=xcflags)
 
     # Disassemble .bc → .ll (source IR for comparison)
     src_ll = outdir / f"{name}.ll"
@@ -107,7 +115,7 @@ def cmd_full(name: str, outdir: Path) -> None:
     # Recompile without debug info → .nodbg.ll (for clean comparison with lifted IR)
     nodbg_ll = outdir / f"{name}.nodbg.ll"
     r = subprocess.run(
-        CC_ARGS + CFLAGS + ["-g0", "-S", "-emit-llvm", str(src), "-o", str(nodbg_ll)]
+        CC_ARGS + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", str(src), "-o", str(nodbg_ll)]
     )
     if r.returncode != 0:
         print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
@@ -122,7 +130,7 @@ def cmd_full(name: str, outdir: Path) -> None:
         sys.exit(rc)
 
     sub = recompile_x86_64(lifted_ll, outdir)
-    ref = compile_arm64_binary(src, outdir)
+    ref = compile_arm64_binary(src, outdir, extra_cflags=xcflags)
     # Compile both source and lifted IR to ARM assembly for comparison
     nodbg_s = outdir / f"{name}.nodbg.s"
     lifted_s = outdir / f"{name}.lifted.s"

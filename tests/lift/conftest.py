@@ -125,12 +125,14 @@ def run_x86_64_linux_binary(
 
 # --- Pipeline steps ---
 
-def compile_bc_and_o(src: Path, workdir: Path) -> tuple[Path, Path]:
+def compile_bc_and_o(
+    src: Path, workdir: Path, extra_cflags: list[str] | None = None
+) -> tuple[Path, Path]:
     """Compile <src> to .bc and .o in <workdir>. Returns (bc_path, o_path)."""
     base = workdir / src.stem
     bc = base.with_suffix(".bc")
     o = base.with_suffix(".o")
-    cmd = CC_ARGS + CFLAGS
+    cmd = CC_ARGS + CFLAGS + (extra_cflags or [])
 
     r = run_command(cmd + ["-emit-llvm", "-c", str(src), "-o", str(bc)])
     if r.returncode != 0:
@@ -159,11 +161,13 @@ def run_arm_lifter(o: Path, bc: Path, workdir: Path) -> Path:
     return output
 
 
-def compile_arm64_binary(src: Path, workdir: Path) -> Path:
+def compile_arm64_binary(
+    src: Path, workdir: Path, extra_cflags: list[str] | None = None
+) -> Path:
     """Compile src to a native ARM64 static binary."""
     output = workdir / f"{src.stem}_arm64"
     r = run_command(
-        CC_ARGS + CFLAGS + ["-static", str(src), "-o", str(output)]
+        CC_ARGS + CFLAGS + (extra_cflags or []) + ["-static", str(src), "-o", str(output)]
     )
     if r.returncode != 0:
         raise RuntimeError(
