@@ -15,6 +15,10 @@
 
 #include <string>
 
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Object/ObjectFile.h"
+#include <map>
+
 namespace llvm {
 class Module;
 class GlobalVariable;
@@ -25,6 +29,13 @@ class StringRef;
 
 class ObjectLiftContext {
   llvm::Module &SharedModule;
+
+  // "__sec_5" → ".rodata.str1.1" (populated lazily by registerSectionLabel)
+  std::map<std::string, std::string> sectionLabelMap;
+
+  // (".rodata.str1.1", 0x2b) → @.str.4  (precomputed by buildGlobalOffsetMap)
+  std::map<std::pair<std::string, uint64_t>, llvm::GlobalVariable*>
+      offsetGlobalMap;
 
 public:
   /// Construct an ObjectLiftContext that manages the given shared Module.
@@ -56,6 +67,26 @@ public:
   /// types don't match). Otherwise creates an external declaration.
   llvm::Constant *getOrCreateGlobalDecl(const llvm::StringRef &Name,
                                          llvm::Type *Ty);
+
+  /// Precompute (section, offset) → GlobalVariable* mapping from ELF section
+  /// bytes and source BC global initializers. Called once after
+  /// importSrcBcGlobals() and before any liftFuncToModule() calls.
+  void buildGlobalOffsetMap(llvm::object::ObjectFile &ELF,
+                            llvm::Module &SrcModule);
+
+  /// Register a mapping from a synthetic global label (e.g. "__sec_5")
+  /// to the ELF section it was created from (e.g. ".rodata.str1.1").
+  void registerSectionLabel(const std::string &label,
+                            const std::string &section);
+
+  /// Look up a source BC GlobalVariable* that matches the given
+  /// (section, offset) pair. Returns nullptr if no match found.
+  llvm::GlobalVariable *
+  lookupGlobalAtOffset(const std::string &section, uint64_t offset) const;
+
+  /// Get the ELF section name for a given label. Returns empty string if
+  /// the label was not registered.
+  std::string getSectionLabel(const std::string &label) const;
 
   /// Get the shared Module reference.
   llvm::Module &getModule() { return SharedModule; }

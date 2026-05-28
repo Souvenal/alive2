@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,57 @@ from conftest import (
     run_arm_lifter,
     run_x86_64_linux_binary,
 )
+
+def verify_lifted_globals(lifted_ll: Path, case_name: str) -> None:
+    """Structural IR assertions for Issue 20: string globals recovery.
+
+    Checks that the lifted IR contains named @.str.N globals with correct
+    ArrayType (not blob StructType), and limits remaining blob globals.
+    """
+    text = lifted_ll.read_text()
+
+    lines = text.splitlines()
+
+    # Count @.str.N and @str definitions
+    str_defs = [l for l in lines if re.match(r'^@(\.str|str)(\.[0-9]+)?\s*=', l)]
+    str_refs = len(re.findall(r'@(\.str|str)(\.[0-9]+)?', text))
+
+    # Count @__sec_N references (blob globals)
+    blob_refs = len(re.findall(r'@__sec_\d+', text))
+
+    # For must_pass cases with known expected string counts
+    # (source BC globals, excluding zeroinitializer which is ConstantAggregateZero)
+    expected_str_defs = {
+        "Maze_novarargs": 15,  # all globals including zeroinitializer
+        "Maze": 13,             # all globals including zeroinitializer
+        "minirepro": 0,
+        "struct_test": 10,  # 10 @.str globals recovered
+    }
+
+    # Verify string globals exist
+    if case_name in expected_str_defs:
+        exp = expected_str_defs[case_name]
+        assert len(str_defs) == exp, (
+            f"Expected {exp} string globals in '{case_name}', "
+            f"got {len(str_defs)}"
+        )
+
+    # Verify blob globals are eliminated — all strings should be resolved
+    # to @.str.N globals via the offset-based byte matching.
+    if case_name in ("Maze_novarargs", "Maze", "minirepro", "struct_test"):
+        assert blob_refs == 0, (
+            f"Expected 0 @__sec_ references in "
+            f"'{case_name}', got {blob_refs}"
+        )
+
+    # Verify linkage — globals should not be private (they're set to weak)
+    for line in str_defs:
+        if "private" in line:
+            print(f"Warning: string global uses private linkage: {line}")
+
+    print(f"[verify_globals] {case_name}: {len(str_defs)} string defs, "
+          f"{str_refs} refs; {blob_refs} @__sec_ refs")
+
 
 # --- Case classification ---
 # Each entry: filename_stem -> (mode, reason, extra_cflags)
@@ -69,7 +121,10 @@ def test_lift(src_path, tmp_path, workdir):
     # Step 2: Lift with arm-lifter
     lifted_ll = run_arm_lifter(o, bc, tmp_path)
 
-    # Step 3: Compile reference ARM64 binary and recompile to x86_64
+    # Step 3: Verify structural IR properties (Issue 20: string globals recovery)
+    verify_lifted_globals(lifted_ll, name)
+
+    # Step 4: Compile reference ARM64 binary and recompile to x86_64
     ref = compile_arm64_binary(src_path, tmp_path, extra_cflags=extra_cflags)
     sub = recompile_x86_64(lifted_ll, tmp_path)
 

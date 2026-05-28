@@ -280,6 +280,9 @@ void runLifter(ostream *out) {
     ObjectLiftContext ObjCtx(*SharedModule);
     ObjCtx.importSrcBcGlobals(*srcModule);
 
+    // Precompute (section, offset) -> GlobalVariable* mapping for string globals
+    ObjCtx.buildGlobalOffsetMap(obj, *srcModule);
+
     // 7. Lift each function into the shared Module
     for (const auto &fnName : funcsToLift) {
         *out << "\n========== Lifting function: " << fnName
@@ -294,6 +297,21 @@ void runLifter(ostream *out) {
     // Clean up register init boilerplate via safe function-local passes.
     // Does NOT do inlining or IPO — preserves original call structure.
     lifter::cleanup_module(*SharedModule);
+
+    // Explicitly remove blob globals (@__sec_N) with zero uses. These were
+    // created by lazyAddGlobal but may have been replaced by source BC string
+    // globals via the offset-based matching in getExprVar(). globaldce doesn't
+    // always remove WeakAnyLinkage constants, so we force-clean them here.
+    for (auto it = SharedModule->global_begin();
+         it != SharedModule->global_end();) {
+      if (it->getName().starts_with("__sec_") && it->use_empty()) {
+        auto *GV = &*it;
+        ++it;
+        GV->eraseFromParent();
+      } else {
+        ++it;
+      }
+    }
 
     // Set all defined global variables to weak linkage to avoid duplicate
     // symbol errors when linking the lifted .ll with other object files.

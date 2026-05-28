@@ -106,6 +106,8 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
     *out << "creating lifted global " << name << " from the assembly\n";
     auto size = g.data.size();
     *out << "  section = " << g.section << "\n";
+    if (ObjCtx)
+      ObjCtx->registerSectionLabel(name, g.section);
 
     vector<Type *> tys;
     vector<Constant *> vals;
@@ -157,7 +159,7 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
     auto initializer = ConstantStruct::get(ty, vals);
     bool isConstant = g.section.starts_with(".rodata") || g.section == ".text";
     auto *glob = new GlobalVariable(*LiftedModule, ty, isConstant,
-                                    GlobalValue::LinkageTypes::ExternalLinkage,
+                                    GlobalValue::LinkageTypes::WeakAnyLinkage,
                                     initializer, name);
     glob->setAlignment(g.align);
     return glob;
@@ -399,6 +401,20 @@ pair<Value *, uint16_t> mc2llvm::getExprVar(const MCExpr *expr) {
   if (!globalVar) {
     *out << "\nERROR: global '" << name << "' not found\n\n";
     exit(-1);
+  }
+
+  // Try to resolve (section, offset) to a source BC string global,
+  // avoiding GEP into the blob. Handles both addend != 0 (offset into
+  // section) and addend == 0 (section base → first string in section).
+  if (ObjCtx) {
+    std::string section = ObjCtx->getSectionLabel(name);
+    if (!section.empty()) {
+      if (auto *matched = ObjCtx->lookupGlobalAtOffset(section, (uint64_t)addend)) {
+        *out << "  resolved " << name << " + " << addend
+             << " to source BC global @" << matched->getName().str() << "\n";
+        return {matched, specifier};
+      }
+    }
   }
 
   // If there's an addend, generate GEP: getelementptr i8, ptr @base, i64 addend
