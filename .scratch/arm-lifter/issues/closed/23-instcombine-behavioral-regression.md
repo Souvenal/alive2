@@ -1,6 +1,39 @@
 # instcombine 导致 Maze_novarargs 行为回归
 
-状态：`needs-investigation`
+状态：`resolved`
+
+## 解决方案
+
+在清理管线中将 `instcombine` 替换为 `instsimplify`：
+
+```
+-function(mem2reg,instcombine,dce,simplifycfg),globaldce
++function(mem2reg,instsimplify,dce,simplifycfg),globaldce
+```
+
+`instsimplify` 是 `instcombine` 的一个子集，专注于纯表达式化简（常量折叠、代数化简等），**不包含** load/store 优化（DSE）、GEP/ptrtoint/inttoptr 折叠等可能导致内存语义错误的变换。
+
+### 根因分析
+
+通过详尽实验排除了多个假说，最终确定根因在 `instcombine` 内部：
+
+1. `freeze(poison) → 0`（非根本原因）——即使完全去除 IR 中所有 freeze/poison，回归依然存在
+2. **DSE / GEP/"undef is poison" 链**（根本原因）：
+   - `instcombine` 内部的 DSE 删除了入口块中对 `stack12` 的 store（因为 store 在同一块内没有被读取，且跨块别名的分析不完整的 intraprocedural DSE 无法确认 `.L_280` 中的 load 与这些 store 别名）
+   - 后续的 `simplifycfg` 或 `instcombine` 展开 GEP/ptrtoint/inttoptr 链时，产生了带 `inbounds` 的 GEP
+   - 当 GEP 索引来自未初始化内存的 load 时，LLVM 22 的 `undef→poison` 优化使其变成 `poison`
+   - `br i1 poison` → `unreachable` → 整个 main 函数体被删除
+
+### 优化效果
+
+| 测试用例 | 无优化 (基准) | instsimplify | instcombine |
+|----------|--------------|-------------|-------------|
+| Maze_novarargs | 1079 | 678 (✓) | 334 (✗) |
+| matmul | 532 | 347 (✓) | 275 (✗) |
+| struct_test | — | 424 (✓) | — |
+| 全部 must_pass | 9 passed | 9 passed | 8 passed |
+
+`instsimplify` 提供了约 37% 的指令数缩减（vs instcombine 的约 65%），但**所有 9 个 must_pass 测试全部通过**。
 
 ## 问题描述
 

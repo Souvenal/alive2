@@ -3,7 +3,8 @@
         "allow": [
             "Bash(llvm-*)",
             "Bash(nm *)",
-            "Bash(./build/Release/arm-lifter *)"
+            "Bash(./build/Release/arm-lifter *)",
+            "Bash(opt *)"
         ]
     }
 }

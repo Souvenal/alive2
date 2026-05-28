@@ -33,7 +33,7 @@ void cleanup_module(llvm::Module &M) {
   // simplifies redundant instructions. simplifycfg cleans up dead
   // basic blocks. globaldce removes unused data sections.
   if (auto Err = PB.parsePassPipeline(
-          MPM, "function(mem2reg,dce,simplifycfg),globaldce"))
+          MPM, "function(mem2reg,instsimplify,dce,simplifycfg),globaldce"))
     report_fatal_error(
         Twine("lifter::cleanup_module: bad pass pipeline: ") +
         toString(std::move(Err)));

@@ -2,8 +2,9 @@
 """Ad-hoc dev tool for lifting cases and inspecting results.
 
 Usage:
-    uv run python tests/lift/dev.py lift <case>              .c → output/<case>.lifted.ll
-    uv run python tests/lift/dev.py full <case>              .c → .ll + lift + x86_64 bin + arm64 ref
+    uv run python tests/lift/dev.py lift <case>              .c → .lifted.ll
+    uv run python tests/lift/dev.py full <case>              full pipeline + asm comparison
+    uv run python tests/lift/dev.py diffasm <case>           diff source vs lifted .s
     uv run python tests/lift/dev.py run <case> <kind>        run existing binary
       kind: arm64 | lifted_x64
     uv run python tests/lift/dev.py clean                    rm -r output/
@@ -122,12 +123,29 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     sub = recompile_x86_64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir)
+    # Compile both source and lifted IR to ARM assembly for comparison
+    nodbg_s = outdir / f"{name}.nodbg.s"
+    lifted_s = outdir / f"{name}.lifted.s"
+    # Compile to ARM assembly via llc. The IR carries target-features from the
+    # lifter's LLVM version; llc may warn about unrecognized ones, but that's
+    # harmless - the generated assembly is still correct.
+    for src, dst in [(nodbg_ll, nodbg_s), (lifted_ll, lifted_s)]:
+        r = subprocess.run(
+            ["llc", "-mtriple=aarch64-linux-gnu", "-O2",
+             str(src), "-o", str(dst)]
+        )
+        if r.returncode != 0:
+            print(f"asm compile failed for {src.name} (exit {r.returncode})",
+                  file=sys.stderr)
+
     print(f"source IR (with dbg) → {src_ll}")
     print(f"source IR (no dbg)    → {nodbg_ll}")
     print(f"x86_64    → {sub}")
     print(f"arm64 ref → {ref}")
     print(f"lift      → {lifted_ll}")
     print(f"log       → {log}")
+    print(f"nodbg asm → {nodbg_s}")
+    print(f"lifted asm → {lifted_s}")
 
 
 def cmd_run(name: str, kind: str, outdir: Path) -> None:
@@ -156,6 +174,18 @@ def cmd_run(name: str, kind: str, outdir: Path) -> None:
     print(f"exit code: {r.returncode}")
 
 
+def cmd_diffasm(name: str, outdir: Path) -> None:
+    """Diff the source and lifted ARM assembly."""
+    nodbg_s = outdir / f"{name}.nodbg.s"
+    lifted_s = outdir / f"{name}.lifted.s"
+    if not nodbg_s.exists() or not lifted_s.exists():
+        sys.exit(f"Run 'dev.py full {name}' first to generate .s files")
+    r = subprocess.run(["diff", "-u", str(nodbg_s), str(lifted_s)])
+    if r.returncode == 0:
+        print("(identical)")
+    return r.returncode
+
+
 def cmd_clean(outdir: Path) -> None:
     shutil.rmtree(outdir)
     print(f"rm -r {outdir}")
@@ -173,7 +203,10 @@ def main() -> None:
     p = sub.add_parser("lift", help="Compile + lift, output .lifted.ll")
     p.add_argument("case")
 
-    p = sub.add_parser("full", help="Lift + recompile to x86_64")
+    p = sub.add_parser("full", help="Lift + recompile + asm comparison")
+    p.add_argument("case")
+
+    p = sub.add_parser("diffasm", help="Diff source vs lifted ARM assembly")
     p.add_argument("case")
 
     p = sub.add_parser("run", help="Run an existing binary")
@@ -191,6 +224,8 @@ def main() -> None:
         cmd_full(args.case, outdir)
     elif args.cmd == "run":
         cmd_run(args.case, args.kind, outdir)
+    elif args.cmd == "diffasm":
+        cmd_diffasm(args.case, outdir)
     elif args.cmd == "clean":
         cmd_clean(outdir)
 
