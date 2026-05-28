@@ -1,31 +1,65 @@
 # arm-lifter end-to-end tests
 
-## Cross-compilation background
+## Architecture
 
-All test binaries target AArch64 ELF (Linux). On macOS/Windows, only `zig cc` bundles a
-Linux sysroot — regular clang cannot cross-compile to Linux. `conftest.py` detects the
-platform and forces `zig cc` on non-Linux, ignoring any `CC` environment variable.
+All test compilation and binary execution happens inside a Linux VM for
+cross-platform reproducibility. A platform-appropriate VM prefix dispatches
+every command to the VM transparently:
+
+| Host platform | VM prefix     | Shared filesystem      |
+|---------------|---------------|------------------------|
+| Linux         | *(none)*      | Native                 |
+| macOS         | `lima --`     | Lima mounts `/Users/`  |
+| Windows       | `wsl --`      | WSL mounts via `/mnt/` |
+
+**`arm-lifter` is the only component that runs natively on the host** — it
+is a macOS binary on Darwin, a Linux binary on Linux, etc.
+
+Inside the Linux VM the standard LLVM toolchain (`clang`, `llvm-dis`, `llc`)
+is used for all compilation steps, replacing the old `zig cc` approach.
 
 ## Prerequisites
 
-- `arm-lifter` built (`./build.sh` at project root, or set `ARM_LIFTER`)
-- Lima VM `lima-default` running (`limactl start`) — macOS only
-- `qemu-aarch64` + `qemu-x86_64` available inside Lima/WSL or on PATH
-- `zig` on PATH (required on macOS/Windows; optional on Linux with custom CC)
+### Host prerequisites
 
-Checks run automatically before each test session; missing tools produce a clear skip message.
+- **`arm-lifter`** built (`./build.sh` at project root, or set `ARM_LIFTER`)
+- **macOS**: Lima VM running (`limactl start`). Homebrew: `brew install lima`
+- **Windows**: WSL installed and configured
+
+### Linux VM prerequisites (inside Lima or WSL)
+
+```
+sudo apt install clang llvm qemu-user gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+```
+
+| Tool | Purpose |
+|------|---------|
+| `clang` | Compile C → ARM64 bitcode + object files |
+| `llvm-dis` | Disassemble `.bc` → `.ll` for IR comparison |
+| `llc` | LLVM static compiler for assembly comparison |
+| `qemu-aarch64` | Run ARM64 test binaries |
+| `qemu-x86_64` | Run recompiled x86_64 test binaries |
+| `gcc-x86-64-linux-gnu` | Cross-linker for x86_64 recompilation on ARM64 hosts |
+| `libc6-dev-amd64-cross` | x86_64 static libc for `-static` linking on ARM64 hosts |
+
+On **x86_64 Linux** hosts the `gcc-x86-64-*` packages are unnecessary (native
+linking); `gcc-aarch64-linux-gnu + libc6-dev-arm64-cross` is needed instead
+for the ARM64 compile step.
+
+Checks run automatically before each test session; missing tools produce a
+clear skip message.
 
 ## Running tests
 
 ```bash
 # Full suite (auto-skips if prerequisites missing)
-uv run pytest tests/lift -v
+cd tests/lift && uv run pytest -v
 
 # Single case
-uv run pytest tests/lift -v -k maze_novarargs
+cd tests/lift && uv run pytest -v -k maze_novarargs
 
 # List all cases without running
-uv run pytest tests/lift --collect-only -v
+cd tests/lift && uv run pytest --collect-only -v
 ```
 
 ### Test classification
@@ -44,10 +78,25 @@ Current cases:
 | `Maze_novarargs` | must_pass | Maze game, no variadic functions |
 | `struct_test` | must_pass | Struct ABI exhaustive test |
 | `minirepro` | must_pass | BL + strb minimal reproducer |
+| `Maze` | must_pass | Full maze game |
+| `indirect_call` | must_pass | BLT xN indirect calls |
+| `compiler_rt_int128` | must_pass | 128-bit integer compiler-rt calls |
+| `printf_minimal` | must_pass | Minimal printf usage |
+| `printf_complex` | must_pass | Complex printf format strings |
+| `matmul` | must_pass | Matrix multiplication benchmark |
 | `init_fini_sections` | xfail | arm-lifter crashes on TBZW + SEH_Nop |
 | `pgo_sections` | xfail | arm-lifter doesn't support PGO section partitioning |
-| `Maze` | xfail | Issue 03 — variadic functions |
-| `indirect_call` | xfail | Issue 09 — blr xN indirect calls |
+| `stream` | xfail | arm-lifter crash on STREAM benchmark opcode |
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARM_LIFTER` | `build/Release/arm-lifter` | Path to arm-lifter binary |
+| `CC` | `clang` | C compiler (resolved via VM PATH; must support `-target`) |
+| `LLVM_DIS` | `llvm-dis` | LLVM disassembler (resolved via VM PATH) |
+| `LLC` | `llc` | LLVM static compiler (resolved via VM PATH) |
+| `CFLAGS` | `-target aarch64-linux-gnu -fno-sanitize=all -O2` | Compiler flags |
 
 ## Development workflow (`dev.py`)
 
@@ -106,7 +155,7 @@ uv run python dev.py -o /tmp/out lift maze_novarargs
    w
    ```
    Test runner automatically pipes stdin. If no sidecar, stdin is empty.
-4. Verify: `uv run pytest tests/lift -v -k <name>`
+4. Verify: `cd tests/lift && uv run pytest -v -k <name>`
 
 ## File structure
 
@@ -122,12 +171,16 @@ tests/lift/
 └── README.md
 ```
 
-## Cross-platform runner dispatch
+## Cross-platform dispatch
 
-Every test binary runs under QEMU for reproducible cross-architecture execution:
+All commands (compilation, disassembly, and binary execution) are dispatched
+through `_vm_prefix()` which prepends the platform-appropriate VM launcher:
 
-| Platform | AArch64 ref | x86_64 subject |
-|----------|-------------|----------------|
-| macOS    | `lima -- qemu-aarch64 <bin>` | `lima -- qemu-x86_64 <bin>` |
-| Linux    | `qemu-aarch64 <bin>` | `qemu-x86_64 <bin>` |
-| Windows  | `wsl -- qemu-aarch64 <wsl-path>` | `wsl -- qemu-x86_64 <wsl-path>` |
+| Task | macOS | Linux | Windows |
+|------|-------|-------|---------|
+| `clang ...` | `lima -- clang ...` | `clang ...` | `wsl -- clang ...` |
+| `llvm-dis ...` | `lima -- llvm-dis ...` | `llvm-dis ...` | `wsl -- llvm-dis ...` |
+| `llc ...` | `lima -- llc ...` | `llc ...` | `wsl -- llc ...` |
+| `qemu-aarch64 <bin>` | `lima -- qemu-aarch64 <bin>` | `qemu-aarch64 <bin>` | `wsl -- qemu-aarch64 <wsl-path>` |
+| `qemu-x86_64 <bin>` | `lima -- qemu-x86_64 <bin>` | `qemu-x86_64 <bin>` | `wsl -- qemu-x86_64 <wsl-path>` |
+| `arm-lifter` | **Direct (native)** | **Direct (native)** | **Direct (native)** |

@@ -21,15 +21,19 @@ sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
-    CC_ARGS,
+    CLANG,
     CFLAGS,
+    LLC,
     LLVM_DIS,
+    _to_vm_path,
+    _vm_prefix,
     compile_arm64_binary,
     compile_bc_and_o,
     get_stdin,
-    run_command,
-    recompile_x86_64,
     run_aarch64_linux_binary,
+    run_command,
+    run_in_vm,
+    recompile_x86_64,
     run_x86_64_linux_binary,
 )
 from test_lift import CASE_MARKS
@@ -105,17 +109,19 @@ def cmd_full(name: str, outdir: Path) -> None:
     xcflags = _extra_cflags(name)
     bc, o = compile_bc_and_o(src, outdir, extra_cflags=xcflags)
 
+    vm_src = _to_vm_path(src)
+
     # Disassemble .bc → .ll (source IR for comparison)
     src_ll = outdir / f"{name}.ll"
-    r = subprocess.run([LLVM_DIS, str(bc), "-o", str(src_ll)])
+    r = run_in_vm([LLVM_DIS, str(bc), "-o", str(src_ll)])
     if r.returncode != 0:
         print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
         sys.exit(r.returncode)
 
-    # Recompile without debug info → .nodbg.ll (for clean comparison with lifted IR)
+    # Recompile without debug info → .nodbg.ll
     nodbg_ll = outdir / f"{name}.nodbg.ll"
-    r = subprocess.run(
-        CC_ARGS + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", str(src), "-o", str(nodbg_ll)]
+    r = run_in_vm(
+        [CLANG] + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
     )
     if r.returncode != 0:
         print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
@@ -131,19 +137,19 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     sub = recompile_x86_64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir, extra_cflags=xcflags)
+
     # Compile both source and lifted IR to ARM assembly for comparison
     nodbg_s = outdir / f"{name}.nodbg.s"
     lifted_s = outdir / f"{name}.lifted.s"
-    # Compile to ARM assembly via llc. The IR carries target-features from the
-    # lifter's LLVM version; llc may warn about unrecognized ones, but that's
-    # harmless - the generated assembly is still correct.
-    for src, dst in [(nodbg_ll, nodbg_s), (lifted_ll, lifted_s)]:
-        r = subprocess.run(
-            ["llc", "-mtriple=aarch64-linux-gnu", "-O2",
-             str(src), "-o", str(dst)]
+    for src_ll_path, dst in [(nodbg_ll, nodbg_s), (lifted_ll, lifted_s)]:
+        vm_src_ll = _to_vm_path(src_ll_path)
+        vm_dst = _to_vm_path(dst)
+        r = run_in_vm(
+            [LLC, "-mtriple=aarch64-linux-gnu", "-O2",
+             vm_src_ll, "-o", vm_dst]
         )
         if r.returncode != 0:
-            print(f"asm compile failed for {src.name} (exit {r.returncode})",
+            print(f"asm compile failed for {src_ll_path.name} (exit {r.returncode})",
                   file=sys.stderr)
 
     print(f"source IR (with dbg) → {src_ll}")

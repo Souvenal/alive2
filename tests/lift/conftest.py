@@ -13,22 +13,50 @@ BUILD_DIR = Path(__file__).resolve().parent / "build"
 # --- Platform detection ---
 IS_DARWIN = sys.platform == "darwin"
 IS_LINUX = sys.platform == "linux"
+IS_WINDOWS = sys.platform == "win32"
+
+# --- VM dispatcher ---
+# All compilation and QEMU execution happens inside a Linux VM.
+# On macOS the VM is Lima; on Windows it's WSL; on Linux we run directly.
+
+def _vm_prefix() -> list[str]:
+    """Return the prefix needed to run commands inside the Linux VM."""
+    if IS_LINUX:
+        return []
+    elif IS_DARWIN:
+        return ["lima", "--"]
+    else:
+        return ["wsl", "--"]
+
+
+def _to_vm_path(p: Path) -> str:
+    """Convert a host path to a path accessible inside the Linux VM.
+
+    On macOS the host filesystem is shared into Lima verbatim (same path).
+    On Windows the path must be translated to the WSL /mnt/ layout.
+    """
+    if IS_WINDOWS:
+        drive = p.drive[0].lower()
+        return f"/mnt/{drive}/{p.relative_to(p.anchor).as_posix()}"
+    return str(p)
+
 
 # --- Tool configuration ---
-# The tests cross-compile to AArch64 ELF (Linux). Only Linux has a native
-# cross-compiler toolchain available; all other platforms (macOS, Windows, etc.)
-# must use zig cc which bundles its own Linux sysroot.
+# arm-lifter runs natively on the host (even on macOS, where it is the only
+# component that does not go through the Linux VM).
 ARM_LIFTER = os.environ.get(
     "ARM_LIFTER", str(PROJECT_ROOT / "build/Release/arm-lifter")
 )
-LLVM_DIS = os.environ.get("LLVM_DIS", "llvm-dis")
-if IS_LINUX:
-    CC = os.environ.get("CC", "gcc")
-else:
-    CC = "zig cc"
-CC_ARGS = CC.split()
+
+# Everything else (compilation, disassembly, QEMU) runs inside a Linux VM
+# where clang and the rest of the LLVM toolchain are installed natively.
+# Strip directory components — commands resolve through the VM's own PATH.
+CLANG = os.path.basename(os.environ.get("CC", "clang"))
+LLVM_DIS = os.path.basename(os.environ.get("LLVM_DIS", "llvm-dis"))
+LLC = os.path.basename(os.environ.get("LLC", "llc"))
+
 CFLAGS = os.environ.get(
-    "CFLAGS", "-target aarch64-linux -fno-sanitize=all -O2"
+    "CFLAGS", "-target aarch64-linux-gnu -fno-sanitize=all -O2"
 ).split()
 
 # Timeouts
@@ -59,17 +87,21 @@ def run_command(
         ) from e
 
 
+def run_in_vm(
+    cmd: list[str],
+    cwd: Path | None = None,
+    timeout: int = 120,
+    stdin_text: str = "",
+) -> subprocess.CompletedProcess:
+    """Run a command inside the Linux VM (platform-appropriate prefix)."""
+    return run_command(
+        _vm_prefix() + cmd, cwd=cwd, timeout=timeout, stdin_text=stdin_text
+    )
+
+
 # --- Cross-platform binary runners ---
 # All test binaries are Linux ELF. Both the AArch64 reference and the x86_64
-# subject always run under QEMU to guarantee identical execution environment
-# regardless of the host's native architecture:
-#
-#   Platform    | AArch64 binary                     | x86_64 binary
-#   ------------|------------------------------------|----------------------------------
-#   macOS       | lima -- qemu-aarch64 <binary>      | lima -- qemu-x86_64 <binary>
-#   Linux       | qemu-aarch64 <binary>              | qemu-x86_64 <binary>
-#   Windows     | wsl -- qemu-aarch64 <wsl-path>     | wsl -- qemu-x86_64 <wsl-path>
-
+# subject always run under QEMU inside the Linux VM:
 
 def _to_wsl_path(p: Path) -> str:
     """Convert a Windows path to a WSL path."""
@@ -83,7 +115,7 @@ def run_aarch64_linux_binary(
     stdin_text: str = "",
     timeout: int = RUN_TIMEOUT,
 ) -> subprocess.CompletedProcess:
-    """Run an AArch64 Linux binary under QEMU."""
+    """Run an AArch64 Linux binary under QEMU (inside VM)."""
     if IS_DARWIN:
         return run_command(
             ["lima", "--", "qemu-aarch64", str(binary)],
@@ -106,7 +138,7 @@ def run_x86_64_linux_binary(
     stdin_text: str = "",
     timeout: int = RUN_TIMEOUT,
 ) -> subprocess.CompletedProcess:
-    """Run an x86_64 Linux binary under QEMU."""
+    """Run an x86_64 Linux binary under QEMU (inside VM)."""
     if IS_DARWIN:
         return run_command(
             ["lima", "--", "qemu-x86_64", str(binary)],
@@ -128,19 +160,27 @@ def run_x86_64_linux_binary(
 def compile_bc_and_o(
     src: Path, workdir: Path, extra_cflags: list[str] | None = None
 ) -> tuple[Path, Path]:
-    """Compile <src> to .bc and .o in <workdir>. Returns (bc_path, o_path)."""
+    """Compile <src> to .bc and .o in <workdir>. Returns (bc_path, o_path).
+
+    Runs inside the Linux VM where clang and the LLVM toolchain live.
+    """
     base = workdir / src.stem
     bc = base.with_suffix(".bc")
     o = base.with_suffix(".o")
-    cmd = CC_ARGS + CFLAGS + (extra_cflags or [])
 
-    r = run_command(cmd + ["-emit-llvm", "-c", str(src), "-o", str(bc)])
+    vm_src = _to_vm_path(src)
+    vm_bc = _to_vm_path(bc)
+    vm_o = _to_vm_path(o)
+
+    cmd = [CLANG] + CFLAGS + (extra_cflags or [])
+
+    r = run_in_vm(cmd + ["-emit-llvm", "-c", vm_src, "-o", vm_bc])
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to compile .bc for {src.name}:\n{r.stderr}\n{r.stdout}"
         )
 
-    r = run_command(cmd + ["-c", str(src), "-o", str(o)])
+    r = run_in_vm(cmd + ["-c", vm_src, "-o", vm_o])
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to compile .o for {src.name}:\n{r.stderr}\n{r.stdout}"
@@ -149,7 +189,10 @@ def compile_bc_and_o(
 
 
 def run_arm_lifter(o: Path, bc: Path, workdir: Path) -> Path:
-    """Run arm-lifter on <o> with --src-bc=<bc>. Returns path to lifted .ll."""
+    """Run arm-lifter on <o> with --src-bc=<bc>. Returns path to lifted .ll.
+
+    arm-lifter runs natively on the host (it does NOT go through the VM).
+    """
     output = workdir / f"{o.stem}.lifted.ll"
     r = run_command(
         [ARM_LIFTER, str(o), "--src-bc", str(bc), "-o", str(output)]
@@ -164,10 +207,14 @@ def run_arm_lifter(o: Path, bc: Path, workdir: Path) -> Path:
 def compile_arm64_binary(
     src: Path, workdir: Path, extra_cflags: list[str] | None = None
 ) -> Path:
-    """Compile src to a native ARM64 static binary."""
+    """Compile src to a static ARM64 Linux binary (inside VM)."""
     output = workdir / f"{src.stem}_arm64"
-    r = run_command(
-        CC_ARGS + CFLAGS + (extra_cflags or []) + ["-static", str(src), "-o", str(output)]
+    vm_src = _to_vm_path(src)
+    vm_output = _to_vm_path(output)
+
+    r = run_in_vm(
+        [CLANG] + CFLAGS + (extra_cflags or [])
+        + ["-static", vm_src, "-o", vm_output]
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -177,22 +224,26 @@ def compile_arm64_binary(
 
 
 def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
-    """Recompile lifted .ll to an x86_64 static binary."""
+    """Recompile lifted .ll to a static x86_64 Linux binary (inside VM)."""
     o_path = workdir / f"{ll_path.stem}.o"
     output = workdir / f"{ll_path.stem}_x86_64"
 
-    r = run_command(
-        CC_ARGS + ["-target", "x86_64-linux-musl", "-c",
-                    str(ll_path), "-o", str(o_path)]
+    vm_ll = _to_vm_path(ll_path)
+    vm_o = _to_vm_path(o_path)
+    vm_output = _to_vm_path(output)
+
+    r = run_in_vm(
+        [CLANG, "-target", "x86_64-linux-gnu", "-c",
+         vm_ll, "-o", vm_o]
     )
     if r.returncode != 0:
         raise RuntimeError(
-            f"Failed to compile lifted .ll to .o:\n{r.stderr}\n{r.stdout}"
+            f"Failed to compile x86_64 .o from {ll_path.name}:\n{r.stderr}\n{r.stdout}"
         )
 
-    r = run_command(
-        CC_ARGS + ["-target", "x86_64-linux-musl", "-static",
-                    str(o_path), "-o", str(output)]
+    r = run_in_vm(
+        [CLANG, "-target", "x86_64-linux-gnu", "-static",
+         vm_o, "-o", vm_output]
     )
     if r.returncode != 0:
         raise RuntimeError(
@@ -209,10 +260,14 @@ def get_stdin(name: str) -> str:
     return ""
 
 
-def _in_vm(vm: str, cmd: list[str]) -> bool:
-    """Return True if <cmd> succeeds inside the VM (lima or wsl)."""
+# --- Prerequisites ---
+
+def _check_tool_in_vm(tool: str) -> bool:
+    """Return True if <tool> is available inside the Linux VM."""
+    if IS_LINUX:
+        return shutil.which(tool) is not None
     try:
-        return run_command([vm, "--"] + cmd, timeout=15).returncode == 0
+        return run_in_vm(["which", tool], timeout=15).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -221,46 +276,31 @@ def check_prerequisites() -> list[str]:
     """Return list of skip reasons, or empty list if all OK."""
     reasons = []
 
+    # arm-lifter runs natively — check on the host
     if not Path(ARM_LIFTER).exists():
         reasons.append(
             f"arm-lifter not found at {ARM_LIFTER} "
             "(set ARM_LIFTER env var or run ./build.sh)"
         )
 
-    # Compiler
-    compiler = CC.split()[0]
-    if shutil.which(compiler) is None:
-        reasons.append(
-            f"Compiler '{compiler}' not found on PATH"
-        )
-
-    # Platform-specific runtime (both binaries always run under QEMU)
+    # VM infrastructure
     if IS_DARWIN:
         if shutil.which("lima") is None:
             reasons.append("lima not found on PATH")
-        else:
-            for qemu in ("qemu-aarch64", "qemu-x86_64"):
-                if not _in_vm("lima", ["which", qemu]):
-                    reasons.append(
-                        f"{qemu} not found in Lima VM "
-                        "(install: lima -- sudo apt install qemu-user)"
-                    )
-
-    elif IS_LINUX:
-        for qemu in ("qemu-aarch64", "qemu-x86_64"):
-            if shutil.which(qemu) is None:
-                reasons.append(f"{qemu} not found on PATH (install qemu-user)")
-
-    else:  # Windows
+            return reasons  # cannot check further
+    elif IS_WINDOWS:
         if shutil.which("wsl") is None:
             reasons.append("wsl not found (install WSL)")
-        else:
-            for qemu in ("qemu-aarch64", "qemu-x86_64"):
-                if not _in_vm("wsl", ["which", qemu]):
-                    reasons.append(
-                        f"{qemu} not found in WSL "
-                        "(install: wsl -- sudo apt install qemu-user)"
-                    )
+            return reasons  # cannot check further
+
+    # Tools that must be available inside the Linux VM
+    vm_tools = [CLANG, LLVM_DIS, LLC, "qemu-aarch64", "qemu-x86_64"]
+    for tool in vm_tools:
+        if not _check_tool_in_vm(tool):
+            reasons.append(
+                f"{tool} not found in Linux VM "
+                "(install: sudo apt install clang llvm qemu-user)"
+            )
 
     return reasons
 
