@@ -4,11 +4,10 @@
 
 **Alive2** is a formal verification tool for LLVM compiler transformations, built on SMT (Z3) solving. This is the **arm-tv fork** which extends Alive2 with ARM (AArch64) and RISC-V backend translation validation — lifting machine code back to LLVM IR for formal equivalence checking.
 
-**Core mission of this fork**: Build `arm-lifter` — a standalone tool that lifts ARM64 assembly (from ELF object files) to LLVM IR, targeting recompilation to semantically equivalent x86_64 assembly. The goal is **asm-to-asm accuracy**: the final x86_64 binary should be functionally indistinguishable from the original ARM64 binary, preserving observable behavior (returns, memory writes, side effects) at the assembly level.
+**Core mission of this fork**: Build `arm-lifter` — a tool that lifts ARM64 assembly (from ELF object files) to semantically faithful LLVM IR. The lifted IR must preserve observable behavior (returns, memory writes, side effects) and be compact enough to serve as a neutral basis for comparing LLVM's AArch64 and x86_64 backends. x86_64 recompilation under QEMU is the primary verification mechanism, not the output goal.
 
 ### Branch Policy
 
-This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
 This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It will **never be merged** into master, and master will never be merged into it. Code unrelated to arm-lifter **can be removed** to reduce clutter and improve code navigation — but deletions must be flagged for **user review** before execution.
 
 ---
@@ -16,22 +15,26 @@ This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    Tools Layer                        │
-│  alive  alive-tv  alive-exec  backend-tv  arm-lifter │
-└──────────┬──────────┬──────────┬──────────────────────┘
-           │          │          │
-┌──────────▼──┐ ┌─────▼──────┐ ┌▼─────────────────────┐
-│  llvm_util  │ │ backend_tv │ │       ir / smt        │
-│  LLVM→Alive │ │ Lifter +   │ │  Alive2 core IR &     │
-│  converter  │ │ ASLP bridge│ │  SMT abstraction      │
-└─────────────┘ └────────────┘ └───────────────────────┘
-                    │
-              ┌─────▼──────┐
-              │   aslp/    │
-              │ ASL→LLVM   │
-              │ semantics  │
-              └────────────┘
+┌──────────────────────────────────┐
+│          Tools Layer             │
+│      arm-lifter  backend-tv      │
+└──────────┬───────────┬───────────┘
+           │           │
+┌──────────▼──┐  ┌─────▼──────────┐
+│ lifter_util │  │   backend_tv   │
+│ arm-lifter  │  │ ARM → IR       │
+│ utilities   │  │ lift engine    │
+│ (ELF→asm,   │  │ (arm2llvm*,    │
+│  cleanup,   │  │  mc2llvm,      │
+│  ABI table) │  │  streamer,     │
+└─────────────┘  │  aslp/)        │
+                 └─────┬──────────┘
+                       │
+              ┌────────▼──────────┐
+              │   ir / smt / tv   │
+              │  Alive2 core IR & │
+              │  SMT (dead here)  │
+              └───────────────────┘
 ```
 
 ### File Hierarchy
@@ -40,35 +43,38 @@ This is a **standalone branch** (`lifter`) with a single goal: `arm-lifter`. It 
 alive2/
 ├── tools/                # CLI entry points
 │   ├── arm-lifter.cpp    # ★ ARM lifter tool (my code)
-│   ├── backend-tv.cpp    # Original TV tool (reference)
-│   ├── alive-tv.cpp      # Standalone TV tool
-│   ├── alive-exec.cpp    # LLVM IR interpreter
-│   └── alive.cpp         # Alive REPL
+│   └── backend-tv.cpp    # Original TV tool (reference, not our focus)
 ├── lifter_util/          # ★ arm-lifter utilities (my code)
-│   ├── binary_reader.h/cpp  # ELF reading / DWARF / symbol map
-│   ├── obj2asm.h/cpp     # ELF → assembly MemoryBuffer generation
-│   └── object_lift_context.h/cpp # Shared Module global lookup
-├── backend_tv/           # ARM lifter + ASLP
+│   ├── binary_reader.h/cpp   # ELF reading / DWARF / symbol map
+│   ├── obj2asm.h/cpp         # ELF → assembly MemoryBuffer generation
+│   ├── object_lift_context.h/cpp # Shared Module global lookup + offset maps
+│   ├── codegen_runtime_abi.h/cpp # Compiler-rt symbol ABI table (issue 11)
+│   └── lifter_cleanup.h/cpp  # Lifted IR cleanup passes
+├── backend_tv/           # ARM lifter + ASLP (pruned-owned, see ADR-0001)
 │   ├── lifter.h/cpp      # generateAsm() / liftFunc() / liftFuncToModule()
 │   ├── mc2llvm.h/cpp     # MC → LLVM core engine
 │   ├── arm2llvm.h/cpp    # ARM instruction lifter
 │   ├── arm2llvm_*.cpp    # ARM instruction categories
 │   ├── streamerwrapper.h/cpp
-│   └── aslp/             # ASLp semantics bridge
-├── ir/                   # Alive2 core IR
-├── smt/                  # Z3/SMT abstraction
+│   └── aslp/             # ASLp semantics bridge (dead code, tracked in issue 05)
+├── .scratch/             # ★ Issue tracking (PRD + open/closed issues)
+│   └── arm-lifter/
+│       ├── PRD.md
+│       └── issues/
+├── docs/                 # Architecture docs + ADRs + changelog
+│   ├── adr/              # Architecture Decision Records
+│   └── changelog/        # Record of every backend_tv modification
+├── ir/                   # Alive2 core IR (upstream, do not modify)
+├── smt/                  # Z3/SMT abstraction (upstream, do not modify)
 ├── llvm_util/            # LLVM → Alive2 converter
-├── tv/                   # Translation validation plugin
-├── util/                 # Utilities
+├── tv/                   # Translation validation plugin (upstream)
+├── util/                 # Utilities (upstream)
 ├── tests/                # Test suite
-│   ├── lift/             # arm-lifter tests (see `tests/lift/README.md`)
+│   ├── lift/             # arm-lifter tests (see tests/lift/README.md)
 │   │   └── cases/        # Test case C sources
-│   ├── lift/             # arm-lifter tests (see `tests/lift/README.md`)
-│   │   └── cases/        # Test case C sources
-│   └── arm-tv/           # ARM TV tests
-├── docs/                 # Implementation plans & notes
+│   └── arm-tv/           # ARM TV tests (upstream)
 ├── scripts/              # Helper scripts
-├── cache/                # Redis caching (optional)
+├── cache/                # Redis caching (dead code — upstream)
 │
 ├── ../llvm-project/      # Shared LLVM build (sibling directory)
 ```
@@ -85,7 +91,7 @@ We only focus on `backend_tv/` and `tools/arm-lifter` for this project.
 
 2. **arm-lifter (this fork's tool)**:
    ```
-   C source → zig cc → ELF .o + .bc ──→ arm-lifter → LLVM IR (.ll)
+   C source → clang → ELF .o + .bc ──→ arm-lifter → LLVM IR (.ll)
                                            │
                         .o ─┬─ Obj2Asm::convertFullAsm() ─┐
                             │  (disassembleTextSection,   │→ AsmBuffer
@@ -93,7 +99,11 @@ We only focus on `backend_tv/` and `tools/arm-lifter` for this project.
                             │   generateBSSDeclarations) ─┘     │
                         .bc ─→ srcFnDecl (real Function*) ─────┘
                                                                   │
-                             SharedModule ← lifted F2
+                        Symbol resolution chain:
+                        SharedModule globals → ABI table → error
+                        (no type-guessing fallback)
+                                                                  │
+                             Shared Module ← lifted F2
                              (all functions in one Module, adjustSrc skipped)
    ```
 
@@ -106,7 +116,6 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 - `<input.o>`: Input AArch64 ELF `.o` file (positional, required)
 - `--src-bc=<file.bc>`: LLVM Bitcode with function signatures and extern declarations (required)
 - `-o / --output-file=file`: Output file path for lifted LLVM IR (default: `<input_basename>.lifted.ll` in current directory)
-- `--optimize-tgt`: Optimization level (default O3)
 - `--run-replace-ptrtoint`: Replace `ptr→int→ptr` round trips with single GEP (default on)
 - `--show-asm`: Print symbolized assembly to stdout for debugging (default off)
 
@@ -118,9 +127,11 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | Component | Files |
 |-----------|-------|
 | Tool entry point | `tools/arm-lifter.cpp` |
-| ELF → assembly utilities | `lifter_util/binary_reader.h/cpp`, `lifter_util/obj2asm.h/cpp`, `lifter_util/object_lift_context.h/cpp` |
+| ELF → assembly utilities | `lifter_util/binary_reader.h/cpp`, `lifter_util/obj2asm.h/cpp` |
+| Shared Module + globals | `lifter_util/object_lift_context.h/cpp` |
+| Compiler-rt ABI table | `lifter_util/codegen_runtime_abi.h/cpp` |
+| Lifted IR cleanup passes | `lifter_util/lifter_cleanup.h/cpp` |
 
-### Shared with `backend_tv` (see ADR-0001)
 ### Shared with `backend_tv` (see ADR-0001)
 | Component | Files | Role |
 |-----------|-------|------|
@@ -128,10 +139,11 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 | ARM instruction lifting | `backend_tv/arm2llvm.h/cpp` + `arm2llvm_*.cpp` | ARM MC → LLVM IR translation |
 | MC→LLVM core | `backend_tv/mc2llvm.h/cpp` | Core MC instruction → LLVM IR engine |
 | Streamer wrapper | `backend_tv/streamerwrapper.h/cpp` | MC streamer for instruction emission |
-| ASLP bridge | `backend_tv/aslp/` | ASLp semantics → LLVM IR |
+| ASLP bridge | `backend_tv/aslp/` | ASLp semantics → LLVM IR (dead code) |
 
 **Design principle**: `backend_tv/` is pruned-owned (see ADR-0001 in `docs/adr/`). Modify deliberately — prefer extending `tools/arm-lifter.cpp` or new files when adding functionality, but feel free to change `backend_tv/` when the architecture calls for it (e.g., fixing bugs, simplifying flow). Avoid gratuitous refactoring.
-**Design principle**: `backend_tv/` is pruned-owned (see ADR-0001 in `docs/adr/`). Modify deliberately — prefer extending `tools/arm-lifter.cpp` or new files when adding functionality, but feel free to change `backend_tv/` when the architecture calls for it (e.g., fixing bugs, simplifying flow). Avoid gratuitous refactoring.
+
+**Every modification to `backend_tv/` MUST be recorded in `docs/changelog/`**, with a dated filename and a short "why" — both bug fixes and deletions. This is the trail we use to reason about divergence when something breaks.
 
 ### Upstream Alive2 (do not modify without reason)
 | Component | Files |
@@ -149,12 +161,8 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
 
 - **Build tool**: CMake + Ninja, C++20, requires `-DBUILD_TV=1`
 - **LLVM**: `release/22.x` with RTTI, cloned as a sibling directory (`../llvm-project`)
-- **Quick**: `./build.sh` or `cmake --build build --target arm-lifter`
-- **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
-- **Full build/LLVM setup guide**: see `/build` skill
-- **Build tool**: CMake + Ninja, C++20, requires `-DBUILD_TV=1`
-- **LLVM**: `release/22.x` with RTTI, cloned as a sibling directory (`../llvm-project`)
-- **Quick**: `./build.sh` or `cmake --build build --config Release --target arm-lifter`
+- **Quick**: `cmake --build build --target arm-lifter`
+- **On multi-config generators**: add `--config Release` (Ninja is single-config, no flag needed)
 - **Env**: `LOCAL_LLVM` overrides LLVM path (default: `../llvm-project`)
 - **Full build/LLVM setup guide**: see `/build` skill
 
@@ -169,8 +177,7 @@ arm-lifter <input.o> --src-bc=<input.bc> [options]
   - `cd tests/lift && uv run python dev.py full <case>` (full pipeline + `.nodbg.ll`)
 - **Primary goal**: lifted IR instruction count must approach `<case>.nodbg.ll`
   (source IR compiled with `-g0`, no debug metadata). `dev.py full` produces both
-  `.lifted.ll` and `.nodbg.ll` for side-by-side comparison — `.nodbg.ll` is the
-  instruction-count target that defines Issue 21 done.
+  `.lifted.ll` and `.nodbg.ll` for side-by-side comparison.
 - **Must-pass** — CI regression if broken. **xfail** (strict) — known-broken, linked to an issue.
 - **Full test guide**: see `/test` skill
 
@@ -193,10 +200,9 @@ Open issues are tracked in `.scratch/arm-lifter/issues/`:
 | 10 | Delete remaining non-lifter code |
 | 15 | Data segment optimization |
 | 16 | Must-pass corpus green |
-| 19 | Lifted globals lose source-level names, use struct types instead of arrays |
-| 20 | All strings packed into 1–2 large globals, no individual `@.str.N` globals |
-| 21 | Register-alloca modeling causes ~3× instruction bloat |
-| 24 | ptrtoint/inttoptr roundtrips + manual vector decomposition cause remaining ~3× gap vs nodbg |
+| 19 | Spurious `__stack_chk_guard` global emitted unconditionally |
+| 25 | Packed string globals bloat assembly |
+| 26 | STREAM printf variadic cast crash |
 
 **Aggregate arguments**: Supported since 2026-05-07 for integer/pointer element types. See `docs/changelog/2026-05-07-aggregate-args.md`.
 
