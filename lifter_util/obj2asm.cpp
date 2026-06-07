@@ -28,6 +28,8 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/Endian.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.h"
 
@@ -254,6 +256,54 @@ public:
 };
 
 // ============================================================================
+// AArch64 branch target pre-scan
+// ============================================================================
+
+/// Scan AArch64 instruction bytes to find all addresses that are targets of
+/// branch instructions (B, B.cond, CBZ, CBNZ, TBZ, TBNZ — NOT BL, which is a
+/// call). These addresses need a .L_<addr> label in the assembly so the
+/// MCAsmParser creates a basic block at each branch target.
+///
+/// Without this pre-scan, every instruction gets a .L_<addr> label, creating
+/// one basic block per instruction — inflating the lifted IR and making
+/// non-optimized output unreadable.
+static std::set<uint64_t>
+scanBranchTargetsAArch64(llvm::StringRef bytes, uint64_t sectionAddr,
+                          uint64_t startAddr, uint64_t endAddr) {
+  std::set<uint64_t> targets;
+  for (uint64_t addr = startAddr; addr + 4 <= endAddr; addr += 4) {
+    uint32_t inst = llvm::support::endian::read32le(
+        bytes.bytes_begin() + (addr - sectionAddr));
+
+    // B (unconditional, excluding BL): bits[31:26] = 000101
+    // BL is 100101 → bit[31] distinguishes them under mask 0xFC000000.
+    if ((inst & 0xFC000000) == 0x14000000) {
+      int64_t offset = llvm::SignExtend64((inst & 0x03FFFFFF) << 2, 28);
+      targets.insert(addr + offset);
+    }
+    // B.cond: bits[31:25] = 0101010, bit[4] = 0
+    else if ((inst & 0xFF000010) == 0x54000000) {
+      int64_t offset =
+          llvm::SignExtend64(((inst >> 5) & 0x7FFFF) << 2, 21);
+      targets.insert(addr + offset);
+    }
+    // CBZ/CBNZ (32- and 64-bit): bits[31:25] = 011010x
+    else if ((inst & 0x7E000000) == 0x34000000) {
+      int64_t offset =
+          llvm::SignExtend64(((inst >> 5) & 0x7FFFF) << 2, 21);
+      targets.insert(addr + offset);
+    }
+    // TBZ/TBNZ (32- and 64-bit): bits[31:25] = 011011x
+    else if ((inst & 0x7E000000) == 0x36000000) {
+      int64_t offset =
+          llvm::SignExtend64(((inst >> 5) & 0x3FFF) << 2, 16);
+      targets.insert(addr + offset);
+    }
+  }
+  return targets;
+}
+
+// ============================================================================
 // Obj2Asm implementation
 // ============================================================================
 
@@ -372,6 +422,20 @@ void Obj2Asm::convertTextSection(
       endAddr = funcSymbols[targetFuncIdx + 1].addr;
   }
 
+  // Pre-scan: identify addresses that need .L_<addr> labels.
+  // Only branch targets (B/B.cond/CBZ/CBNZ/TBZ/TBNZ) need labels.
+  // Function entry addresses already have their own label emitted below,
+  // so skip them even if something branches to the function entry.
+  std::set<uint64_t> branchTargets;
+  if (bytes.size() >= 4) {
+    branchTargets = scanBranchTargetsAArch64(bytes, sectionAddr,
+                                             startAddr, endAddr);
+    // Remove function entry addresses — they already have function labels
+    // which the parser will turn into basic blocks.
+    for (auto &[fnAddr, _] : funcStartMap)
+      branchTargets.erase(fnAddr);
+  }
+
   // Emit .file directive for DWARF line info
   // MCAsmStreamer's emitFileDirective emits ".file \"dir\" \"filename\"" form,
   // but we need the file-number form ".file 1 \".\" \"input.o\"" for .loc directives.
@@ -448,8 +512,11 @@ void Obj2Asm::convertTextSection(
     P->Streamer->emitDwarfLocDirective(1, instCount, 0, 0, 0, 0, StringRef(),
                                      StringRef());
 
-    // Emit address label
-    {
+    // Emit address label — only at actual branch targets.
+    // Every instruction used to get .L_<addr>, which created one basic block
+    // per instruction during parsing. The pre-scan above (branchTargets)
+    // limits labels to addresses that are actual branch targets.
+    if (branchTargets.count(addr)) {
       stringstream labelSS;
       labelSS << ".L_" << hex << addr;
       MCSymbol *AddrSym = P->Ctx->getOrCreateSymbol(labelSS.str());

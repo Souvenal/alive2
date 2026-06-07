@@ -14,7 +14,10 @@ using namespace llvm;
 
 namespace lifter {
 
-void cleanup_module(llvm::Module &M) {
+void cleanup_module(llvm::Module &M, bool run_passes) {
+  if (!run_passes)
+    return;
+
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

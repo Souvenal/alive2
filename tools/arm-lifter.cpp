@@ -83,6 +83,13 @@ llvm::cl::opt<string> opt_src_bc(
                    "and extern declarations (required)"),
     llvm::cl::cat(lifter_cmdargs), llvm::cl::Required);
 
+llvm::cl::opt<bool> opt_run_cleanup(
+    "run-cleanup",
+    llvm::cl::desc(
+        "Run cleanup passes (mem2reg, dce, simplifycfg, globaldce) on lifted IR"
+        " (default=true)"),
+    llvm::cl::init(true), llvm::cl::cat(lifter_cmdargs));
+
 llvm::cl::opt<bool> opt_show_asm(
     "show-asm",
     llvm::cl::desc("Print the generated assembly to stdout (default=false)"),
@@ -296,7 +303,7 @@ void runLifter(ostream *out) {
 
     // Clean up register init boilerplate via safe function-local passes.
     // Does NOT do inlining or IPO — preserves original call structure.
-    lifter::cleanup_module(*SharedModule);
+    lifter::cleanup_module(*SharedModule, opt_run_cleanup);
 
     // Explicitly remove blob globals (@__sec_N) with zero uses. These were
     // created by lazyAddGlobal but may have been replaced by source BC string

@@ -12,5 +12,5 @@ class Module;
 }
 
 namespace lifter {
-void cleanup_module(llvm::Module &M);
+void cleanup_module(llvm::Module &M, bool run_passes = true);
 }

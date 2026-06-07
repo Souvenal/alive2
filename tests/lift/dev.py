@@ -4,6 +4,8 @@
 Usage:
     uv run python tests/lift/dev.py lift <case>              .c → .lifted.ll
     uv run python tests/lift/dev.py full <case>              full pipeline + asm comparison
+    uv run python tests/lift/dev.py full-without-optimize <case>
+                                                             full pipeline (no cleanup passes) + asm comparison
     uv run python tests/lift/dev.py diffasm <case>           diff source vs lifted .s
     uv run python tests/lift/dev.py run <case> <kind>        run existing binary
       kind: arm64 | lifted_x64
@@ -71,11 +73,12 @@ def _outdir(base: Path | None) -> Path:
     return d
 
 
-def _lift(o: Path, bc: Path, lifted_ll: Path, log: Path) -> int:
-    r = subprocess.run(
-        [ARM_LIFTER, str(o), "--src-bc", str(bc), "-o", str(lifted_ll)],
-        capture_output=True, text=True,
-    )
+def _lift(o: Path, bc: Path, lifted_ll: Path, log: Path,
+          cleanup: bool = True) -> int:
+    cmd = [ARM_LIFTER, str(o), "--src-bc", str(bc), "-o", str(lifted_ll)]
+    if not cleanup:
+        cmd.append("--run-cleanup=false")
+    r = subprocess.run(cmd, capture_output=True, text=True)
     log.write_text(r.stdout + r.stderr)
     return r.returncode
 
@@ -131,6 +134,67 @@ def cmd_full(name: str, outdir: Path) -> None:
     log = outdir / f"{name}.lift.log"
 
     rc = _lift(o, bc, lifted_ll, log)
+    if rc != 0:
+        print(f"arm-lifter failed (exit {rc}), see {log}", file=sys.stderr)
+        sys.exit(rc)
+
+    sub = recompile_x86_64(lifted_ll, outdir)
+    ref = compile_arm64_binary(src, outdir, extra_cflags=xcflags)
+
+    # Compile both source and lifted IR to ARM assembly for comparison
+    nodbg_s = outdir / f"{name}.nodbg.s"
+    lifted_s = outdir / f"{name}.lifted.s"
+    for src_ll_path, dst in [(nodbg_ll, nodbg_s), (lifted_ll, lifted_s)]:
+        vm_src_ll = _to_vm_path(src_ll_path)
+        vm_dst = _to_vm_path(dst)
+        r = run_in_vm(
+            [LLC, "-mtriple=aarch64-linux-gnu", "-O2",
+             vm_src_ll, "-o", vm_dst]
+        )
+        if r.returncode != 0:
+            print(f"asm compile failed for {src_ll_path.name} (exit {r.returncode})",
+                  file=sys.stderr)
+
+    print(f"source IR (with dbg) → {src_ll}")
+    print(f"source IR (no dbg)    → {nodbg_ll}")
+    print(f"x86_64    → {sub}")
+    print(f"arm64 ref → {ref}")
+    print(f"lift      → {lifted_ll}")
+    print(f"log       → {log}")
+    print(f"nodbg asm → {nodbg_s}")
+    print(f"lifted asm → {lifted_s}")
+
+
+def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
+    """Same as cmd_full but passes --run-cleanup=false to arm-lifter."""
+    _require_arm_lifter()
+    src = _check_case(name)
+    _clean_case(name, outdir)
+    xcflags = _extra_cflags(name)
+    bc, o = compile_bc_and_o(src, outdir, extra_cflags=xcflags)
+
+    vm_src = _to_vm_path(src)
+
+    # Disassemble .bc → .ll (source IR for comparison)
+    src_ll = outdir / f"{name}.ll"
+    r = run_in_vm([LLVM_DIS, str(bc), "-o", str(src_ll)])
+    if r.returncode != 0:
+        print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
+        sys.exit(r.returncode)
+
+    # Recompile without debug info → .nodbg.ll
+    nodbg_ll = outdir / f"{name}.nodbg.ll"
+    r = run_in_vm(
+        [CLANG] + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
+    )
+    if r.returncode != 0:
+        print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
+        sys.exit(r.returncode)
+
+    lifted_ll = outdir / f"{name}.lifted.ll"
+    log = outdir / f"{name}.lift.log"
+
+    rc = _lift(o, bc, lifted_ll, log, cleanup=False)
     if rc != 0:
         print(f"arm-lifter failed (exit {rc}), see {log}", file=sys.stderr)
         sys.exit(rc)
@@ -220,6 +284,10 @@ def main() -> None:
     p = sub.add_parser("full", help="Lift + recompile + asm comparison")
     p.add_argument("case")
 
+    p = sub.add_parser("full-without-optimize",
+                       help="Lift without cleanup passes + recompile + asm comparison")
+    p.add_argument("case")
+
     p = sub.add_parser("diffasm", help="Diff source vs lifted ARM assembly")
     p.add_argument("case")
 
@@ -236,6 +304,8 @@ def main() -> None:
         cmd_lift(args.case, outdir)
     elif args.cmd == "full":
         cmd_full(args.case, outdir)
+    elif args.cmd == "full-without-optimize":
+        cmd_full_no_cleanup(args.case, outdir)
     elif args.cmd == "run":
         cmd_run(args.case, args.kind, outdir)
     elif args.cmd == "diffasm":
