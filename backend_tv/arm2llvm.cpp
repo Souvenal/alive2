@@ -1700,9 +1700,17 @@ Value *arm2llvm::readFromRegTyped(unsigned Reg, Type *ty) {
     return intVal;
   }
 
-  auto intVal = createLoad(getIntTy(backingSize), RegAddr);
+  // Load the full backing register as an integer, then convert.
+  Value *intVal = createLoad(getIntTy(backingSize), RegAddr);
   if (ty->isPointerTy())
     return new IntToPtrInst(intVal, ty, "", LLVMBB);
+
+  // For FP and vector types: if the backing register is wider than the
+  // target type, truncate to the target width first, then bitcast.
+  // This handles e.g. reading a 64-bit double from a 128-bit Q register.
+  auto bitWidth = getBitWidth(ty);
+  if (bitWidth < backingSize)
+    intVal = createTrunc(intVal, getIntTy(bitWidth));
   return createBitCast(intVal, ty);
 }
 

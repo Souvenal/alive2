@@ -76,6 +76,10 @@ public:
   // Saved source-side CallInst for variadic callees discovered during the
   // checkInstSupport pre-pass. Used when the arm-lifter's empty lineMap
   // prevents getCurLLVMInst() from resolving the source CallInst.
+  // Stores the CallInst with the most arguments — this works for calls
+  // where the largest-arg call has type-compatible variadic parameters
+  // (all integers, all same-size). Mismatched types require a per-call
+  // matching approach beyond max-arg heuristic.
   std::unordered_map<std::string, llvm::CallInst *> variadicCallSites;
   unsigned origRetWidth = 64;
   bool has_ret_attr = false;

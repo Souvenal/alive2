@@ -1065,8 +1065,13 @@ void mc2llvm::checkInstSupport(Instruction &i, const DataLayout &DL,
       auto name = (string)callee->getName();
 
       if (callee->isVarArg()) {
-        // Keep the entry with the most arguments — Maze has multiple printf
-        // calls with different arg counts; the last one may be the smallest.
+        // Store the CallInst with the most arguments.
+        // This works for calls where all variadic params are type-compatible
+        // (e.g., all integers). For mixed types (int + double), the max-arg
+        // heuristic may pick a CallInst with wider types than the actual
+        // assembly instruction, but the readFromRegTyped truncation fix in
+        // arm2llvm.cpp prevents that from crashing — only marsed values may
+        // differ.
         auto it = variadicCallSites.find(name);
         if (it == variadicCallSites.end() || ci->arg_size() > it->second->arg_size())
           variadicCallSites[name] = ci;
