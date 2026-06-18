@@ -348,6 +348,7 @@ public:
   void lift_fnm(unsigned opcode);
   void lift_fsqrt();
   void lift_vec_fpbinop(unsigned opcode);
+  void lift_vec_fmla();
   void lift_fcmp(unsigned opcode);
   void lift_fccmp();
   void lift_smov_vi(unsigned opcode);

@@ -211,6 +211,25 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
                             newGlobal, LiftedModule);
   }
 
+  // Fallback for __sec_N labels that reference sections without assembly data
+  // (e.g. BSS sections which emit .comm directives, not progbits data). These
+  // labels appear in sectionOffsetLabels because .text has a relocation against
+  // .bss+addend, but convertDataSections skips NOBITS sections so no MCGlobal
+  // exists. Create a zeroinitializer placeholder; mc2llvm does address
+  // arithmetic via GEP anyway.
+  if (ObjCtx && newGlobal.starts_with("__sec_")) {
+    auto *existingGV = ObjCtx->lookupGlobal(newGlobal);
+    if (!existingGV) {
+      *out << "  creating zeroinitializer global for section label "
+           << newGlobal << "\n";
+      existingGV = new GlobalVariable(
+          *LiftedModule, getIntTy(8), false,
+          GlobalValue::LinkageTypes::InternalLinkage,
+          ConstantInt::get(getIntTy(8), 0), newGlobal);
+    }
+    return existingGV;
+  }
+
   *out << "ERROR: global symbol '" << newGlobal << "' not found\n";
   exit(-1);
 }

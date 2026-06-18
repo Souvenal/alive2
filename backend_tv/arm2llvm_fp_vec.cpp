@@ -144,6 +144,7 @@ void arm2llvm::lift_vec_fpbinop(unsigned opcode) {
   case AArch64::FADDv2f64:
   case AArch64::FSUBv2f64:
   case AArch64::FMULv2f64:
+  case AArch64::FDIVv2f64:
     eltSize = 64;
     numElts = 2;
     break;
@@ -171,10 +172,26 @@ void arm2llvm::lift_vec_fpbinop(unsigned opcode) {
   case AArch64::FMULv2f64:
     res = createFMul(a, b);
     break;
+  case AArch64::FDIVv2f64:
+    res = createFDiv(a, b);
+    break;
   default:
     assert(false);
   };
   updateOutputReg(res);
+}
+
+void arm2llvm::lift_vec_fmla() {
+  // FMLAv2f64: a = op1, b = op2, c = op3; result = a + b * c (fused).
+  // ARM FMLA is a tied-accumulator: a += b * c.
+  const unsigned eltSize = 64, numElts = 2;
+  auto a = readFromVecOperand(1, eltSize, numElts, /*isUpperHalf=*/false,
+                              /*isFP=*/true);
+  auto b = readFromVecOperand(2, eltSize, numElts, /*isUpperHalf=*/false,
+                              /*isFP=*/true);
+  auto c = readFromVecOperand(3, eltSize, numElts, /*isUpperHalf=*/false,
+                              /*isFP=*/true);
+  updateOutputReg(createFAdd(a, createFMul(b, c)));
 }
 
 void arm2llvm::lift_fmov_3(unsigned opcode) {

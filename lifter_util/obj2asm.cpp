@@ -1007,6 +1007,10 @@ Obj2Asm::convertFullAsm(ObjectFile &obj,
            secName.find("eh_frame") != string::npos))
         continue;
 
+      // Also build synthetic labels for BSS section relocations.
+      // BSS has no file-backed data but needs __sec_N labels so
+      // lazyAddGlobal can create placeholder globals for address
+      // arithmetic resolution.
       for (SectionRef relaSec : obj.sections()) {
         auto relocatedSecOrErr = relaSec.getRelocatedSection();
         if (!relocatedSecOrErr || *relocatedSecOrErr != sec)

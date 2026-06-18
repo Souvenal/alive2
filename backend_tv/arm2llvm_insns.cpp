@@ -950,7 +950,12 @@ void arm2llvm::lift(MCInst &I) {
   case AArch64::FMULv2f32:
   case AArch64::FMULv4f32:
   case AArch64::FMULv2f64:
+  case AArch64::FDIVv2f64:
     lift_vec_fpbinop(opcode);
+    break;
+
+  case AArch64::FMLAv2f64:
+    lift_vec_fmla();
     break;
 
   case AArch64::FCMPSri:

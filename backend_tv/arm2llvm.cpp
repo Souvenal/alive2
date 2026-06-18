@@ -3352,6 +3352,8 @@ const set<int> arm2llvm::instrs_128 = {
     AArch64::FSUBv2f64,
     AArch64::FMULv4f32,
     AArch64::FMULv2f64,
+    AArch64::FDIVv2f64,
+    AArch64::FMLAv2f64,
 };
 
 bool arm2llvm::has_s(int instr) {
