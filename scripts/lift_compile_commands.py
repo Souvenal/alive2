@@ -128,37 +128,110 @@ def drop_flag(args, flag, has_value=False):
     return out
 
 
-def build_bc_cmd(entry, bc_path):
-    """Generate .bc command: original flags + -emit-llvm, output to bc_path."""
+def is_cc1_entry(entry):
+    """Detect -cc1 internal compiler invocations (vs clang driver)."""
     args = get_args(entry)
-    compiler = args[0]
+    return "-cc1" in args
 
-    # Drop -o <orig>
-    args = drop_flag(args, "-o", has_value=True)
-    # Drop -c (we add -emit-llvm -c)
-    args = drop_flag(args, "-c")
-    # Drop the source file (last positional) — match by basename
+
+def extract_user_flags(entry):
+    """Extract user-facing flags from a -cc1 entry: -I, -D, -O only."""
+    args = get_args(entry)
+    out = []
+    it = iter(args)
+    for a in it:
+        if a in ("-I", "-D", "-O"):
+            out.append(a)
+            try:
+                out.append(next(it))
+            except StopIteration:
+                pass
+        elif a.startswith("-I") or a.startswith("-D") or a.startswith("-O"):
+            out.append(a)
+    return out
+
+
+def build_object_cmd(entry, obj_path):
+    """Generate .o compile command: use clang (supports -emit-llvm)."""
+    args = get_args(entry)
+    is_cc1 = is_cc1_entry(entry)
+
+    if is_cc1:
+        args = ["clang", "-target", "aarch64-linux-gnu"] + extract_user_flags(entry)
+    else:
+        # Use clang instead of gcc -- -emit-llvm is clang-only
+        args = ["clang"] + list(args)[1:]
+        args = drop_flag(args, "-o", has_value=True)
+        args = drop_flag(args, "-c")
+        src_file = entry.get("file", "")
+        if src_file:
+            src_base = os.path.basename(src_file)
+            args = [a for a in args if os.path.basename(a) != src_base]
+
     src_file = entry.get("file", "")
-    if src_file:
-        src_base = os.path.basename(src_file)
-        args = [a for a in args if os.path.basename(a) != src_base]
+    args.extend(["-c", src_file, "-o", obj_path])
+    return args
 
-    args.extend(["-emit-llvm", "-c", src_file, "-o", bc_path])
+
+def build_bc_cmd(entry, bc_path):
+    """Generate .ll command: original flags + -S -emit-llvm, output to bc_path.
+    Emits textual IR to avoid BC version mismatch between VM clang and host LLVM."""
+    args = get_args(entry)
+    is_cc1 = is_cc1_entry(entry)
+
+    if is_cc1:
+        args = ["clang", "-target", "aarch64-linux-gnu"] + extract_user_flags(entry)
+    else:
+        args = ["clang"] + list(args)[1:]
+        args = drop_flag(args, "-o", has_value=True)
+        args = drop_flag(args, "-c")
+        src_file = entry.get("file", "")
+        if src_file:
+            src_base = os.path.basename(src_file)
+            args = [a for a in args if os.path.basename(a) != src_base]
+
+    src_file = entry.get("file", "")
+    args.extend(["-S", "-emit-llvm", src_file, "-o", bc_path])
+    return args
+
+
+def build_recompile_cmd(entry, ll_path, obj_path):
+    """Recompile .ll → .o using clang (original flags, no -emit-llvm)."""
+    args = get_args(entry)
+    is_cc1 = is_cc1_entry(entry)
+
+    if is_cc1:
+        args = ["clang", "-target", "aarch64-linux-gnu"] + extract_user_flags(entry)
+    else:
+        args = ["clang"] + list(args)[1:]
+        args = drop_flag(args, "-o", has_value=True)
+        args = drop_flag(args, "-c")
+        src_file = entry.get("file", "")
+        if src_file:
+            src_base = os.path.basename(src_file)
+            args = [a for a in args if os.path.basename(a) != src_base]
+
+    args.extend(["-c", ll_path, "-o", obj_path])
     return args
 
 
 def build_recompile_cmd(entry, ll_path, obj_path):
     """Recompile .ll → .o using original flags (no -emit-llvm)."""
     args = get_args(entry)
+    is_cc1 = is_cc1_entry(entry)
 
-    # Drop -o <orig> and -c (we re-add them cleanly)
-    args = drop_flag(args, "-o", has_value=True)
-    args = drop_flag(args, "-c")
-    # Drop source file reference — match by basename
-    src_file = entry.get("file", "")
-    if src_file:
-        src_base = os.path.basename(src_file)
-        args = [a for a in args if os.path.basename(a) != src_base]
+    if is_cc1:
+        args = ["clang", "-target", "aarch64-linux-gnu"] + extract_user_flags(entry)
+    else:
+        args = list(args)
+        # Drop -o <orig> and -c (we re-add them cleanly)
+        args = drop_flag(args, "-o", has_value=True)
+        args = drop_flag(args, "-c")
+        # Drop source file reference — match by basename
+        src_file = entry.get("file", "")
+        if src_file:
+            src_base = os.path.basename(src_file)
+            args = [a for a in args if os.path.basename(a) != src_base]
 
     args.extend(["-c", ll_path, "-o", obj_path])
     return args
@@ -211,6 +284,7 @@ def main():
     vm_prefix = args.vm_prefix if args.vm_prefix is not None else detect_vm_prefix()
 
     with open(log_path, "w") as log_fh:
+        seen_sources = set()
         for i, entry in enumerate(db):
             directory = entry.get("directory", ".")
             arguments = get_args(entry)
@@ -220,10 +294,48 @@ def main():
                 print(f"[{i+1}/{len(db)}] SKIP {entry_label}: no output file")
                 continue
 
+            # Deduplicate: skip entries for source files already processed.
+            # Compile_commands.json often has both clang-driver and clang -cc1
+            # entries for the same source (e.g. entries 1-6 vs 7-12).
+            src_file = entry.get("file", "")
+            if src_file in seen_sources:
+                print(f"[{i+1}/{len(db)}] SKIP {src_file}: already processed")
+                continue
+            if src_file:
+                seen_sources.add(src_file)
+
             obj_path = resolve(directory, output)
             src_file = entry.get("file", "")
-            obj_dir = os.path.dirname(obj_path)
-            stem = os.path.splitext(os.path.basename(obj_path))[0]
+
+            # Detect linked executables (output is .exe or has linker sections).
+            # The compile_commands may emit all TUs to the same linked output
+            # (e.g. -o ./coremark.exe). Derive per-TU .o from source file stem.
+            obj_basename = os.path.basename(obj_path)
+            obj_is_linked = not obj_basename.endswith(".o") and not obj_basename.endswith(".obj")
+            if obj_is_linked and src_file:
+                obj_dir = os.path.dirname(
+                    resolve(directory, output)
+                ) if os.path.isabs(obj_path) else os.path.normpath(
+                    os.path.join(directory, os.path.dirname(output))
+                )
+                stem = os.path.splitext(os.path.basename(src_file))[0]
+            elif src_file:
+                # For -cc1 entries with temp paths (/tmp/xxx.o), place .o
+                # alongside source for shared-filesystem access (arm-lifter
+                # runs natively on host, can't see VM /tmp).
+                if os.path.dirname(src_file):
+                    obj_dir = os.path.join(
+                        os.path.dirname(resolve(directory, output)),
+                        os.path.dirname(src_file),
+                    )
+                else:
+                    obj_dir = os.path.dirname(resolve(directory, output))
+                stem = os.path.splitext(os.path.basename(src_file))[0]
+            else:
+                obj_dir = os.path.dirname(obj_path)
+                stem = os.path.splitext(obj_basename)[0]
+
+            obj_path = os.path.join(obj_dir, stem + ".o")
 
             bc_path = os.path.join(obj_dir, stem + ".bc")
             ll_path = os.path.join(obj_dir, stem + ".lifted.ll")
@@ -231,8 +343,16 @@ def main():
 
             print(f"\n[{i+1}/{len(db)}] {obj_path}")
 
+            # Step 0: Compile .c → .o in VM (object may be in VM /tmp)
+            print("  [0/4] Compile object")
+            oc_cmd = build_object_cmd(entry, obj_path)
+            ok_oc, r_oc = run(oc_cmd, args.dry_run, cwd=directory, vm_prefix=vm_prefix)
+            if not ok_oc:
+                log_error(log_fh, entry_label, "object compilation", r_oc)
+                continue
+
             # Step 1: source → .bc (in VM for cross-arch ELF target)
-            print("  [1/3] Emit bitcode")
+            print("  [1/4] Emit bitcode")
             bc_cmd = build_bc_cmd(entry, bc_path)
             ok_bc, r_bc = run(bc_cmd, args.dry_run, cwd=directory, vm_prefix=vm_prefix)
             if not ok_bc:
@@ -240,7 +360,7 @@ def main():
                 continue
 
             # Step 2: arm-lifter .o + .bc → .ll (native only)
-            print("  [2/3] arm-lifter")
+            print("  [2/4] arm-lifter")
             lifter_cmd = [args.arm_lifter, obj_path, f"--src-bc={bc_path}", "-o", ll_path]
             ok_lift, r_lift = run(lifter_cmd, args.dry_run)
             if not ok_lift:
@@ -254,7 +374,7 @@ def main():
                     pass
 
             # Step 3: .ll → .o recompile (in VM for ELF output)
-            print("  [3/3] Recompile .ll → .o")
+            print("  [3/4] Recompile .ll → .o")
             rc_cmd = build_recompile_cmd(entry, ll_path, lifted_obj)
             ok_rc, r_rc = run(rc_cmd, args.dry_run, cwd=directory, vm_prefix=vm_prefix)
             if not ok_rc:

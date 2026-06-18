@@ -230,6 +230,35 @@ Constant *mc2llvm::lazyAddGlobal(string newGlobal) {
     return existingGV;
   }
 
+  // Fallback for .L_* local labels: create internal zeroinitializer.
+  // These are assembler-local branch-target labels that can't be extern
+  // function declarations — the linker rejects undefined .L_* symbols.
+  if (newGlobal.starts_with(".L_")) {
+    *out << "  creating zeroinitializer for local label '"
+         << newGlobal << "'\n";
+    auto *gv = new GlobalVariable(
+        *LiftedModule, getIntTy(8), false,
+        GlobalValue::InternalLinkage,
+        ConstantInt::get(getIntTy(8), 0), newGlobal);
+    return gv;
+  }
+
+  // Fallback: create extern function declaration. This covers cross-TU
+  // function pointer references (e.g. iterate → ADRP matrix_test) where
+  // the function exists in the exe but not in src-bc. We need the pointer
+  // value only — the function body is not lifted.
+  {
+    auto *existing = LiftedModule->getFunction(newGlobal);
+    if (!existing) {
+      *out << "  creating extern function declaration for '"
+           << newGlobal << "' (not in src-bc)\n";
+      auto *FT = FunctionType::get(Type::getVoidTy(Ctx), /*isVarArg=*/true);
+      existing = Function::Create(FT, GlobalValue::ExternalLinkage,
+                                  newGlobal, LiftedModule);
+    }
+    return existing;
+  }
+
   *out << "ERROR: global symbol '" << newGlobal << "' not found\n";
   exit(-1);
 }

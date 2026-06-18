@@ -991,23 +991,17 @@ Obj2Asm::convertFullAsm(ObjectFile &obj,
     }
   }
 
-  // Check for executable sections other than .text
-  vector<string> skippedExecSections;
+  // Executable sections other than .text (.init, .plt, .fini) contain
+  // linker-generated code (CRT stubs, PLT entries). No user functions live
+  // there, so just warn and skip them. The .text reloc map + disassembly
+  // loop below already only process .text.
   for (SectionRef sec : obj.sections()) {
     auto nameOrErr = sec.getName();
     string secName = nameOrErr ? nameOrErr->str() : "";
-    if (sec.isText() && secName != ".text")
-      skippedExecSections.push_back(secName);
-  }
-  if (!skippedExecSections.empty()) {
-    *P->Out << "ERROR: Executable sections other than .text are not supported: ";
-    for (unsigned i = 0; i < skippedExecSections.size(); ++i) {
-      if (i > 0) *P->Out << ", ";
-      *P->Out << skippedExecSections[i];
+    if (sec.isText() && secName != ".text") {
+      *P->Out << "warning: Skipping executable section \"" << secName
+              << "\" — no user code expected here.\n";
     }
-    *P->Out << "\nThese sections contain code that will be missing from the "
-         << "lifted IR.\nSee AGENTS.md Known Limitation #9 for details.\n";
-    exit(-1);
   }
 
   auto sectionOffsetLabels = buildSectionOffsetLabels(textRelocMap);

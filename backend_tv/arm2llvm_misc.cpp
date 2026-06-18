@@ -7,7 +7,24 @@ using namespace llvm;
 
 void arm2llvm::lift_adrp() {
   assert(CurInst->getOperand(0).isReg());
-  mapExprVar(CurInst->getOperand(1).getExpr());
+  auto &op = CurInst->getOperand(1);
+  if (op.isExpr()) {
+    mapExprVar(op.getExpr());
+  } else {
+    // In linked executables, ADRP operands are already resolved to
+    // immediate page offsets (no relocations). Store as a raw constant
+    // value in the expression-to-variable map instead of crashing.
+    assert(op.isImm());
+    *out << "  ADRP operand is raw immediate (no relocation)\n";
+    std::string key = std::to_string(reinterpret_cast<uintptr_t>(CurInst));
+    instExprVarMap[CurInst] = key;
+    // Create a temp global to hold the immediate value so subsequent
+    // ADDXri can reference it via getExprVar
+    auto *gv = new GlobalVariable(*LiftedModule, getIntTy(64), true,
+                                  GlobalValue::InternalLinkage,
+                                  getUnsignedIntConst(op.getImm(), 64));
+    LLVMglobals[key] = gv;
+  }
 }
 
 void arm2llvm::lift_movk(unsigned opcode) {

@@ -1775,7 +1775,8 @@ Value *arm2llvm::readFromOperand(int idx, unsigned size) {
   if (!size)
     size = getInstSize(CurInst->getOpcode());
   // Expr operand is required for a combination of ADRP and ADDXri address
-  // calculation
+  // calculation. In linked executables the operand may be a resolved
+  // immediate instead.
   assert(op.isImm() || op.isReg() || op.isExpr());
 
   if (!(size == 8 || size == 16 || size == 32 || size == 64 || size == 128)) {

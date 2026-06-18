@@ -10,6 +10,7 @@ tests/temp/*
 logs/
 output/
 *.o
+*.out
 *.log
 commands_*.txt
 .cache

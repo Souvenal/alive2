@@ -30,6 +30,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
@@ -37,6 +38,7 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -256,20 +258,31 @@ void runLifter(ostream *out) {
         exit(-1);
     }
 
+    // Try bitcode first, then fall back to textual IR (.ll). This handles
+    // cross-version BC where VM clang produces a different BC format than
+    // the LLVM version arm-lifter is built against.
     auto srcModuleOrErr = parseBitcodeFile(
         bcBufferOrErr->get()->getMemBufferRef(), sharedCtx);
     if (!srcModuleOrErr) {
-        *out << "ERROR: Failed to parse bitcode file: " << opt_src_bc << "\n";
+        consumeError(srcModuleOrErr.takeError());
+        // Retry as textual IR
+        SMDiagnostic Err;
+        srcModuleOrErr = parseIRFile(opt_src_bc, Err, sharedCtx);
+    }
+    if (!srcModuleOrErr) {
+        *out << "ERROR: Failed to parse src-bc file (tried both bitcode and "
+             << "textual IR): " << opt_src_bc << "\n";
         exit(-1);
     }
     unique_ptr<Module> srcModule = std::move(*srcModuleOrErr);
 
     // 5. Collect functions to lift from the object file's symbol table.
-    //    The object may be optimized and have fewer functions than src-bc
-    //    (inlining, DCE). The object is the ground truth for what exists.
+    //    Filter to only those declared in src-bc — the object may be a linked
+    //    exe with glibc stubs (putchar@GLIBC_2.17) that are not user code.
     vector<string> funcsToLift;
     for (auto &[addr, info] : symMap) {
-        if (info.isFunction && !info.name.empty())
+        if (info.isFunction && !info.name.empty() &&
+            srcModule->getFunction(info.name))
             funcsToLift.push_back(info.name);
     }
     if (funcsToLift.empty()) {
