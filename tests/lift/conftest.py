@@ -243,7 +243,7 @@ def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
 
     r = run_in_vm(
         [CLANG, "-target", "x86_64-linux-gnu", "-static",
-         vm_o, "-o", vm_output]
+         vm_o, "-o", vm_output, "-lm"]
     )
     if r.returncode != 0:
         raise RuntimeError(

@@ -83,7 +83,7 @@ CASE_MARKS: dict[str, tuple] = {
     "printf_minimal": ("must_pass", None, []),
     "printf_complex": ("must_pass", None, []),
     "matmul": ("must_pass", None, []),
-    "stream": ("xfail", "arm-lifter crash: clang codegen exposes unknown opcode (gettimeofday + timing loop)", ["-DSTREAM_ARRAY_SIZE=200", "-DNTIMES=2"]),
+    "stream": ("must_pass", None, ["-DSTREAM_ARRAY_SIZE=200", "-DNTIMES=2"]),
 }
 
 # Cases where stdout differs between QEMU-aarch64 and QEMU-x86_64

@@ -95,8 +95,10 @@ private:
   void convertDataSections(llvm::object::ObjectFile &obj,
                             const SectionOffsetLabels &sectionOffsetLabels);
 
-  /// Emit BSS declarations (.comm) as assembly.
-  void convertBSSDeclarations(llvm::object::ObjectFile &obj);
+  /// Emit BSS declarations (.zero) and __sec_N labels for section relocations.
+  void convertBSSDeclarations(
+      llvm::object::ObjectFile &obj,
+      const SectionOffsetLabels &sectionOffsetLabels);
 
   // MC infrastructure — unique_ptrs to incomplete types, destructor in .cpp
   struct Impl;

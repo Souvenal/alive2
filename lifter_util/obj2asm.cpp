@@ -861,7 +861,8 @@ void Obj2Asm::convertDataSections(ObjectFile &obj,
   }
 }
 
-void Obj2Asm::convertBSSDeclarations(ObjectFile &obj) {
+void Obj2Asm::convertBSSDeclarations(ObjectFile &obj,
+                                       const SectionOffsetLabels &sectionOffsetLabels) {
   for (SectionRef sec : obj.sections()) {
     if (!sec.isBSS())
       continue;
@@ -870,6 +871,31 @@ void Obj2Asm::convertBSSDeclarations(ObjectFile &obj) {
     if (secName.empty())
       continue;
 
+    uint64_t secSize = sec.getSize();
+    if (secSize == 0)
+      continue;
+
+    // Switch to .bss section
+    MCSectionELF *ELFSec = P->Ctx->getELFSection(
+        secName, ELF::SHT_NOBITS, ELF::SHF_WRITE | ELF::SHF_ALLOC);
+    P->Streamer->switchSection(ELFSec);
+
+    // Emit synth labels for section+addend references (only at offset 0;
+    // non-zero offsets are handled as base+addend by the symbolizer).
+    for (auto &[key, label] : sectionOffsetLabels) {
+      if (key.first == secName && key.second == 0) {
+        MCSymbol *Sym = P->Ctx->getOrCreateSymbol(label);
+        P->Streamer->emitLabel(Sym);
+        break;
+      }
+    }
+
+    // Emit .zero to create the section data in MCGlobals.
+    // This is needed so lazyAddGlobal finds a properly-sized MCGlobal
+    // instead of falling back to a 1-byte zeroinitializer placeholder.
+    P->Streamer->emitZeros(secSize);
+
+    // Emit symbols in this BSS section
     for (SymbolRef sym : obj.symbols()) {
       Expected<SymbolRef::Type> typeOrErr = sym.getType();
       if (!typeOrErr)
@@ -1053,7 +1079,7 @@ Obj2Asm::convertFullAsm(ObjectFile &obj,
   convertDataSections(obj, sectionOffsetLabels);
 
   // 3. Convert BSS declarations
-  convertBSSDeclarations(obj);
+  convertBSSDeclarations(obj, sectionOffsetLabels);
 
   // Flush and return
   P->OS->flush();
