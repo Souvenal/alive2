@@ -25,6 +25,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include <cstdint>
+#include <sstream>
 
 #include "backend_tv/lifter.h"
 #include "backend_tv/streamerwrapper.h"

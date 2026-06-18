@@ -1,3 +1,4 @@
+import glob
 import os
 import shutil
 import subprocess
@@ -52,8 +53,25 @@ ARM_LIFTER = os.environ.get(
 # where clang and the rest of the LLVM toolchain are installed natively.
 # Strip directory components — commands resolve through the VM's own PATH.
 CLANG = os.path.basename(os.environ.get("CC", "clang"))
+# Linux: os.environ.get("CC", "clang-20")
 LLVM_DIS = os.path.basename(os.environ.get("LLVM_DIS", "llvm-dis"))
+# Linux: os.environ.get("LLVM_DIS", "llvm-dis-20")
 LLC = os.path.basename(os.environ.get("LLC", "llc"))
+# Linux: os.environ.get("LLC", "llc-20")
+
+# # Linux gcc-cross toolchain auto-detection (uncomment on Linux)
+# # gcc_cross_dirs = sorted(glob.glob('/usr/lib/gcc-cross/aarch64-linux-gnu/*/'))
+# # gcc_cross_path = gcc_cross_dirs[-1] if gcc_cross_dirs else "/usr/lib/gcc-cross/aarch64-linux-gnu/11/"
+# # CFLAGS = [
+# #     "-target", "aarch64-linux-gnu",
+# #     "-fuse-ld=/usr/bin/ld.lld-20",
+# #     "-B", gcc_cross_path,
+# #     "-L", gcc_cross_path,
+# #     "-I", "/usr/aarch64-linux-gnu/include",
+# #     "-L", "/usr/aarch64-linux-gnu/lib",
+# #     "-fno-sanitize=all",
+# #     "-O2"
+# # ]
 
 CFLAGS = os.environ.get(
     "CFLAGS", "-target aarch64-linux-gnu -fno-sanitize=all -O2"
