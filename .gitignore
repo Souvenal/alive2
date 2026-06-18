@@ -8,6 +8,9 @@ temp/*
 tests/temp/*
 
 logs/
+output/
+*.o
+*.log
 commands_*.txt
 .cache
 .venv
