@@ -1,0 +1,6 @@
+build/
+*.o
+*.bc
+*.lifted.ll
+*.lifted.o
+example_lifted*

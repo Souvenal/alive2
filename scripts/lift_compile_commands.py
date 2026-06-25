@@ -2,20 +2,30 @@
 """
 Batch-lift AArch64 ELF .o files using arm-lifter, driven by compile_commands.json.
 
+Prerequisite:
+  The target project MUST be compiled with clang (CC=clang CXX=clang++).
+  arm-lifter needs .ll (LLVM textual IR) for symbol resolution, which only
+  clang can produce via -emit-llvm. This script validates the compiler on
+  startup and aborts with a clear error if non-clang entries are found.
+
 Workflow per entry:
-  1. Emit .bc from source  (original flags + -emit-llvm)
-  2. arm-lifter <obj> --src-bc=<bc> -o <obj>.lifted.ll
-  3. Recompile .ll → .o using original flags
+  0. Compile .c -> .o (re-compile in VM to ensure fresh object)
+  1. Emit .ll from source (original flags + -S -emit-llvm)
+  2. arm-lifter <obj> --src-bc=<ll> -o <obj>.lifted.ll
+  3. Recompile .ll -> .o using clang
   4. Link all .lifted.o (optional)
 
 Usage:
   python3 lift_compile_commands.py /path/to/compile_commands.json \\
       --arm-lifter=./build/Release/arm-lifter \\
-      --linker="zig cc -target aarch64-linux-gnu" \\
+      --linker="clang -target aarch64-linux-gnu" \\
       --link-output=lifted_binary
 
-  # Dry-run first:
+  # Dry-run first (validates compiler, prints commands without running):
   python3 lift_compile_commands.py cc.json --dry-run
+
+  # Override compiler (bypasses clang validation):
+  python3 lift_compile_commands.py cc.json --cc="clang -target aarch64-linux-gnu"
 """
 
 import argparse
@@ -215,26 +225,43 @@ def build_recompile_cmd(entry, ll_path, obj_path):
     return args
 
 
-def build_recompile_cmd(entry, ll_path, obj_path):
-    """Recompile .ll → .o using original flags (no -emit-llvm)."""
-    args = get_args(entry)
-    is_cc1 = is_cc1_entry(entry)
+def validate_clang_compiler(db):
+    """Validate that all compile_commands entries use clang.
 
-    if is_cc1:
-        args = ["clang", "-target", "aarch64-linux-gnu"] + extract_user_flags(entry)
-    else:
-        args = list(args)
-        # Drop -o <orig> and -c (we re-add them cleanly)
-        args = drop_flag(args, "-o", has_value=True)
-        args = drop_flag(args, "-c")
-        # Drop source file reference — match by basename
-        src_file = entry.get("file", "")
-        if src_file:
-            src_base = os.path.basename(src_file)
-            args = [a for a in args if os.path.basename(a) != src_base]
+    arm-lifter requires .ll (LLVM textual IR) files for symbol resolution,
+    which can only be produced by clang (-emit-llvm). If the project was
+    built with gcc or another compiler, bitcode generation will fail.
 
-    args.extend(["-c", ll_path, "-o", obj_path])
-    return args
+    Prints a clear error and returns False if any entry uses a non-clang
+    compiler. Callers should abort early.
+    """
+    non_clang = []
+    for i, entry in enumerate(db):
+        args = get_args(entry)
+        if not args:
+            continue
+        compiler = os.path.basename(args[0])
+        if "clang" not in compiler:
+            src = entry.get("file", "?")
+            non_clang.append((i, compiler, src))
+
+    if non_clang:
+        print("ERROR: compile_commands.json contains non-clang compiler entries.",
+              file=sys.stderr)
+        print("arm-lifter requires clang to generate .ll files (-emit-llvm).",
+              file=sys.stderr)
+        print(f"Found {len(non_clang)} non-clang entries:", file=sys.stderr)
+        for idx, compiler, src in non_clang[:10]:
+            print(f"  [{idx}] {compiler}  (file: {src})", file=sys.stderr)
+        if len(non_clang) > 10:
+            print(f"  ... and {len(non_clang) - 10} more", file=sys.stderr)
+        print("\nFix: rebuild the target project with CC=clang CXX=clang++",
+              file=sys.stderr)
+        print("  e.g.: cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ ..",
+              file=sys.stderr)
+        print("  or:   CC=clang CXX=clang++ make", file=sys.stderr)
+        return False
+    return True
 
 
 def run(cmd, dry_run, cwd=None, vm_prefix=None):
@@ -265,6 +292,12 @@ def main():
     args = parse_args()
     db = load_db(args.compile_commands)
     print(f"Loaded {len(db)} entries from {args.compile_commands}")
+
+    # Validate that all entries use clang (required for -emit-llvm).
+    # Skip validation when --cc override is provided, since the override
+    # replaces the compiler in all entries before processing.
+    if not args.cc and not validate_clang_compiler(db):
+        sys.exit(1)
 
     if args.cc:
         # Override compiler in all entries
