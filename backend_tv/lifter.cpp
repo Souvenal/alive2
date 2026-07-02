@@ -124,13 +124,14 @@ liftFuncToModule(Function *srcFn, unique_ptr<MemoryBuffer> MB,
                  ostream *out, const Target *Targ,
                  Triple DefaultTT, const char *DefaultCPU,
                  const char *DefaultFeatures, Module &ExternalModule,
-                 ObjectLiftContext &ObjCtx) {
+                 ObjectLiftContext &ObjCtx,
+                 InstructionMapFunction *instructionMap) {
   string backend{Targ->getName()};
   unique_ptr<mc2llvm> lifter;
   if (backend == "aarch64") {
     lifter = make_unique<arm2llvm>(srcFn, std::move(MB), lineMap, out, Targ,
                                    DefaultTT, DefaultCPU, DefaultFeatures,
-                                   ExternalModule, ObjCtx);
+                                   ExternalModule, ObjCtx, instructionMap);
   } else {
     *out << "ERROR: Nonexistent backend\n";
     exit(-1);

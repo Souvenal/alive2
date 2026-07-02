@@ -3,6 +3,7 @@
 #include <ostream>
 #include <string>
 
+#include "lifter_util/instruction_map.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -60,7 +61,8 @@ liftFuncToModule(llvm::Function *srcFn,
                  std::ostream *out,
                  const llvm::Target *Targ, llvm::Triple DefaultTT,
                  const char *DefaultCPU, const char *DefaultFeatures,
-                 llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx);
+                 llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx,
+                 InstructionMapFunction *instructionMap = nullptr);
 
 /*
  * random utility function

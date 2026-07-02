@@ -1,6 +1,9 @@
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCSymbol.h"
+
+#include <set>
 
 #include "backend_tv/lifter.h"
 #include "backend_tv/mc2llvm.h"
@@ -758,7 +761,18 @@ void mc2llvm::storeToMemoryValOffset(Value *base, Value *offset, uint64_t size,
   createStore(val, ptr);
 }
 
-void mc2llvm::liftInst(MCInst &I) {
+string mc2llvm::formatInst(const MCInst &I) {
+  if (I.getOpcode() == sentinelNOP())
+    return "";
+
+  string asmText;
+  raw_string_ostream stream(asmText);
+  InstPrinter->printInst(&I, 100, "", *STI.get(), stream);
+  stream.flush();
+  return asmText;
+}
+
+void mc2llvm::liftInst(MCInst &I, const string &asmText) {
   *out << "mcinst: " << I.getOpcode() << " = ";
   PrevInst = CurInst;
   CurInst = &I;
@@ -766,11 +780,9 @@ void mc2llvm::liftInst(MCInst &I) {
   std::string sss;
   llvm::raw_string_ostream ss{sss};
   I.dump_pretty(ss, InstPrinter);
+  ss.flush();
   *out << sss << " = " << std::flush;
-  if (I.getOpcode() != sentinelNOP()) {
-    InstPrinter->printInst(&I, 100, "", *STI.get(), outs());
-    outs().flush();
-  }
+  *out << asmText;
   *out << std::endl;
 
   lift(I);
@@ -954,7 +966,35 @@ pair<Function *, Function *> mc2llvm::run() {
 
   platformInit();
 
+  // -- Set up DWARF debug info so recompiled code can trace back to ARM asm --
+  llvm::DIBuilder DBuilder(*LiftedModule);
+
+  // Module flags: only add if not already present (shared Module may have them)
+  if (!LiftedModule->getModuleFlag("Debug Info Version"))
+    LiftedModule->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                                llvm::DEBUG_METADATA_VERSION);
+  if (!LiftedModule->getModuleFlag("Dwarf Version"))
+    LiftedModule->addModuleFlag(llvm::Module::Warning, "Dwarf Version",
+                                llvm::dwarf::DWARF_VERSION);
+
+  auto *DIFile = DBuilder.createFile("arm_asm.s", ".");
+  auto *CU = DBuilder.createCompileUnit(
+      llvm::dwarf::DW_LANG_C, DIFile, "arm-lifter", false, "", 0);
+  auto *SubroutineTy =
+      DBuilder.createSubroutineType(DBuilder.getOrCreateTypeArray({}));
+  auto *SP = DBuilder.createFunction(
+      CU, liftedFn->getName(), llvm::StringRef(), DIFile, 1, SubroutineTy, 0,
+      llvm::DINode::FlagPrototyped, llvm::DISubprogram::SPFlagDefinition);
+  liftedFn->setSubprogram(SP);
+
   *out << "\n\nlifting assembly instructions to LLVM\n";
+
+  // Track BBs that existed before lifting. Only BBs created BY lift() will
+  // be annotated — platformInit instructions and infrastructure branches
+  // (which are in pre-existing BBs) are correctly skipped.
+  std::set<llvm::BasicBlock *> preLiftBBs;
+  for (auto &bb : *liftedFn)
+    preLiftBBs.insert(&bb);
 
   for (auto &[llvm_bb, mc_bb] : BBs) {
     LLVMBB = llvm_bb;
@@ -965,11 +1005,41 @@ pair<Function *, Function *> mc2llvm::run() {
 
     for (auto &inst : mc_instrs) {
       llvmInstNum = 0;
+      unsigned asmLine = armInstNum + 1; // DWARF line 0 reserved, use 1-based
+      auto asmText = formatInst(inst);
       *out << armInstNum << " : about to lift opcode " << inst.getOpcode()
            << " " << (string)InstPrinter->getOpcodeName(inst.getOpcode())
            << "\n";
-      liftInst(inst);
+      if (InstructionMap) {
+        InstructionMap->instructions.push_back(
+            {.armInstId = armInstNum,
+             .dwarfLine = asmLine,
+             .mcBlock = mc_bb->getName(),
+             .opcode = (string)InstPrinter->getOpcodeName(inst.getOpcode()),
+             .opcodeId = inst.getOpcode(),
+             .asmText = std::move(asmText)});
+        liftInst(inst, InstructionMap->instructions.back().asmText);
+      } else {
+        liftInst(inst, asmText);
+      }
       *out << "    lifted\n";
+
+      // Annotate all BBs created during this lift() with the ARM inst index.
+      auto loc = llvm::DILocation::get(Ctx, asmLine, 0, SP);
+      for (auto &bb : *liftedFn) {
+        if (preLiftBBs.count(&bb))
+          continue;                     // old BB: infrastructure, skip
+        for (auto &i : bb) {
+          if (i.getDebugLoc())
+            continue;                   // already annotated (shared BB edge case)
+          i.setDebugLoc(loc);
+        }
+      }
+
+      // Mark all current BBs as "old" for the next lift().
+      for (auto &bb : *liftedFn)
+        preLiftBBs.insert(&bb);
+
       ++armInstNum;
     }
 
@@ -988,6 +1058,9 @@ pair<Function *, Function *> mc2llvm::run() {
       }
     }
   }
+
+  DBuilder.finalize();
+
   *out << armInstNum << " assembly instructions\n";
 
   *out << "encoding counts: ";

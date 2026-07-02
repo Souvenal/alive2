@@ -36,9 +36,10 @@ arm2llvm::arm2llvm(Function *srcFn, unique_ptr<MemoryBuffer> MB,
                    unordered_map<unsigned, Instruction *> &lineMap,
                    ostream *out, const Target *Targ, Triple DefaultTT,
                    const char *DefaultCPU, const char *DefaultFeatures,
-                   Module &ExternalModule, ObjectLiftContext &ObjCtx)
+                   Module &ExternalModule, ObjectLiftContext &ObjCtx,
+                   InstructionMapFunction *instructionMap)
     : mc2llvm(srcFn, std::move(MB), lineMap, out, Targ, DefaultTT, DefaultCPU,
-              DefaultFeatures, ExternalModule, ObjCtx) {
+              DefaultFeatures, ExternalModule, ObjCtx, instructionMap) {
   // sanity checking
   assert(disjoint(instrs_32, instrs_64));
   assert(disjoint(instrs_32, instrs_128));

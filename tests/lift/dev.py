@@ -35,6 +35,7 @@ from conftest import (
     run_aarch64_linux_binary,
     run_command,
     run_in_vm,
+    recompile_arm64,
     recompile_x86_64,
     run_x86_64_linux_binary,
 )
@@ -74,10 +75,12 @@ def _outdir(base: Path | None) -> Path:
 
 
 def _lift(o: Path, bc: Path, lifted_ll: Path, log: Path,
-          cleanup: bool = True) -> int:
+          cleanup: bool = True, asm_map: Path | None = None) -> int:
     cmd = [ARM_LIFTER, str(o), "--src-bc", str(bc), "-o", str(lifted_ll)]
     if not cleanup:
         cmd.append("--run-cleanup=false")
+    if asm_map is not None:
+        cmd.extend(["--asm-map", str(asm_map)])
     r = subprocess.run(cmd, capture_output=True, text=True)
     log.write_text(r.stdout + r.stderr)
     return r.returncode
@@ -95,14 +98,16 @@ def cmd_lift(name: str, outdir: Path) -> None:
     bc, o = compile_bc_and_o(src, outdir, extra_cflags=_extra_cflags(name))
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
+    asm_map = outdir / f"{name}.asm-map.json"
 
-    rc = _lift(o, bc, lifted_ll, log)
+    rc = _lift(o, bc, lifted_ll, log, asm_map=asm_map)
     if rc != 0:
         print(f"arm-lifter failed (exit {rc})", file=sys.stderr)
         sys.exit(rc)
 
     print(f"lift      → {lifted_ll}")
     print(f"log       → {log}")
+    print(f"asm map   → {asm_map}")
 
 
 def cmd_full(name: str, outdir: Path) -> None:
@@ -132,13 +137,15 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
+    asm_map = outdir / f"{name}.asm-map.json"
 
-    rc = _lift(o, bc, lifted_ll, log)
+    rc = _lift(o, bc, lifted_ll, log, asm_map=asm_map)
     if rc != 0:
         print(f"arm-lifter failed (exit {rc}), see {log}", file=sys.stderr)
         sys.exit(rc)
 
     sub = recompile_x86_64(lifted_ll, outdir)
+    sub_arm64 = recompile_arm64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir, extra_cflags=xcflags)
 
     # Compile both source and lifted IR to ARM assembly for comparison
@@ -158,9 +165,11 @@ def cmd_full(name: str, outdir: Path) -> None:
     print(f"source IR (with dbg) → {src_ll}")
     print(f"source IR (no dbg)    → {nodbg_ll}")
     print(f"x86_64    → {sub}")
+    print(f"arm64 re  → {sub_arm64}")
     print(f"arm64 ref → {ref}")
     print(f"lift      → {lifted_ll}")
     print(f"log       → {log}")
+    print(f"asm map   → {asm_map}")
     print(f"nodbg asm → {nodbg_s}")
     print(f"lifted asm → {lifted_s}")
 
@@ -193,13 +202,15 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
 
     lifted_ll = outdir / f"{name}.lifted.ll"
     log = outdir / f"{name}.lift.log"
+    asm_map = outdir / f"{name}.asm-map.json"
 
-    rc = _lift(o, bc, lifted_ll, log, cleanup=False)
+    rc = _lift(o, bc, lifted_ll, log, cleanup=False, asm_map=asm_map)
     if rc != 0:
         print(f"arm-lifter failed (exit {rc}), see {log}", file=sys.stderr)
         sys.exit(rc)
 
     sub = recompile_x86_64(lifted_ll, outdir)
+    sub_arm64 = recompile_arm64(lifted_ll, outdir)
     ref = compile_arm64_binary(src, outdir, extra_cflags=xcflags)
 
     # Compile both source and lifted IR to ARM assembly for comparison
@@ -219,9 +230,11 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
     print(f"source IR (with dbg) → {src_ll}")
     print(f"source IR (no dbg)    → {nodbg_ll}")
     print(f"x86_64    → {sub}")
+    print(f"arm64 re  → {sub_arm64}")
     print(f"arm64 ref → {ref}")
     print(f"lift      → {lifted_ll}")
     print(f"log       → {log}")
+    print(f"asm map   → {asm_map}")
     print(f"nodbg asm → {nodbg_s}")
     print(f"lifted asm → {lifted_s}")
 

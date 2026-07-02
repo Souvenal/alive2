@@ -15,6 +15,7 @@
 // calls become direct calls and global variables use complete src-bc definitions.
 
 #include "lifter_util/binary_reader.h"
+#include "lifter_util/instruction_map.h"
 #include "lifter_util/lifter_cleanup.h"
 #include "lifter_util/obj2asm.h"
 #include "lifter_util/object_lift_context.h"
@@ -97,6 +98,12 @@ llvm::cl::opt<bool> opt_show_asm(
     llvm::cl::desc("Print the generated assembly to stdout (default=false)"),
     llvm::cl::init(false), llvm::cl::cat(lifter_cmdargs));
 
+llvm::cl::opt<string> opt_asm_map(
+    "asm-map",
+    llvm::cl::desc(
+        "Write structured ARM instruction correlation map to this JSON file"),
+    llvm::cl::cat(lifter_cmdargs));
+
 static const llvm::Triple DefaultTT = llvm::Triple("aarch64-unknown-linux-gnu");
 static const char *const DefaultDL =
     "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32";
@@ -169,7 +176,8 @@ bool liftOneFunction(ObjectFile &obj, const llvm::Target *Targ,
                      const map<uint64_t, lifter::SymbolInfo> &symMap,
                      Module *srcModule, const string &fnName,
                      Module &SharedModule,
-                     ObjectLiftContext &ObjCtx, ostream *out) {
+                     ObjectLiftContext &ObjCtx, ostream *out,
+                     lifter::InstructionMapFunction *instructionMap) {
 
     // Generate complete assembly MemoryBuffer (filtered to this function)
     obj2asm::Obj2Asm converter(Targ, out);
@@ -193,7 +201,8 @@ bool liftOneFunction(ObjectFile &obj, const llvm::Target *Targ,
     unordered_map<unsigned, Instruction *> lineMap; // empty
     Function *F2 = lifter::liftFuncToModule(
         srcFn, std::move(AsmBuffer), lineMap, out, Targ,
-        DefaultTT, DefaultCPU, DefaultFeatures, SharedModule, ObjCtx);
+        DefaultTT, DefaultCPU, DefaultFeatures, SharedModule, ObjCtx,
+        instructionMap);
 
     if (!F2) {
         *out << "ERROR: liftFuncToModule returned null for '" << fnName
@@ -304,11 +313,20 @@ void runLifter(ostream *out) {
     ObjCtx.buildGlobalOffsetMap(obj, *srcModule);
 
     // 7. Lift each function into the shared Module
+    vector<lifter::InstructionMapFunction> instructionMapFunctions;
+    if (opt_asm_map != "")
+        instructionMapFunctions.reserve(funcsToLift.size());
+
     for (const auto &fnName : funcsToLift) {
         *out << "\n========== Lifting function: " << fnName
              << " ==========\n";
+        lifter::InstructionMapFunction *instructionMap = nullptr;
+        if (opt_asm_map != "") {
+            instructionMapFunctions.push_back({.name = fnName});
+            instructionMap = &instructionMapFunctions.back();
+        }
         if (!liftOneFunction(obj, Targ, symMap, srcModule.get(), fnName,
-                             *SharedModule, ObjCtx, out)) {
+                             *SharedModule, ObjCtx, out, instructionMap)) {
             *out << "ERROR: Failed to lift function '" << fnName << "'\n";
             exit(-1);
         }
@@ -381,6 +399,21 @@ void runLifter(ostream *out) {
     of << lifted;
     of.close();
     *out << "Lifted IR saved to " << outputPath.string() << "\n";
+
+    if (opt_asm_map != "") {
+        fs::path asmMapPath = fs::path(std::string(opt_asm_map));
+        if (asmMapPath.has_parent_path() && !asmMapPath.parent_path().empty()) {
+            fs::create_directories(asmMapPath.parent_path());
+        }
+        if (auto error =
+                lifter::writeInstructionMapFile(asmMapPath.string(),
+                                                instructionMapFunctions)) {
+            *out << "ERROR: Cannot write instruction map: "
+                 << asmMapPath.string() << ": " << error.message() << "\n";
+            exit(-1);
+        }
+        *out << "Instruction map saved to " << asmMapPath.string() << "\n";
+    }
 
     *out << "\n========== Done: lifted " << funcsToLift.size()
          << " function(s) successfully ==========\n";

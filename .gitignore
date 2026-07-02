@@ -16,4 +16,5 @@ commands_*.txt
 .cache
 .venv
 
-!.claude/skills/**
+!.agents/skills/build/
+!.agents/skills/build/**

@@ -47,7 +47,8 @@ public:
            std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
            std::ostream *out, const llvm::Target *Targ, llvm::Triple DefaultTT,
            const char *DefaultCPU, const char *DefaultFeatures,
-           llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx);
+           llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx,
+           InstructionMapFunction *instructionMap);
 
   // Implemented library pseudocode for signed satuaration from A64 ISA manual
   std::tuple<llvm::Value *, bool> SignedSatQ(llvm::Value *i, unsigned bitWidth);

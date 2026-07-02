@@ -251,7 +251,7 @@ def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
     vm_output = _to_vm_path(output)
 
     r = run_in_vm(
-        [CLANG, "-target", "x86_64-linux-gnu", "-c",
+        [CLANG, "-target", "x86_64-linux-gnu", "-g", "-c",
          vm_ll, "-o", vm_o]
     )
     if r.returncode != 0:
@@ -266,6 +266,35 @@ def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to link x86_64 binary:\n{r.stderr}\n{r.stdout}"
+        )
+    return output
+
+
+def recompile_arm64(ll_path: Path, workdir: Path) -> Path:
+    """Recompile lifted .ll to a static AArch64 Linux binary (inside VM)."""
+    o_path = workdir / f"{ll_path.stem}.arm64.o"
+    output = workdir / f"{ll_path.stem}_arm64"
+
+    vm_ll = _to_vm_path(ll_path)
+    vm_o = _to_vm_path(o_path)
+    vm_output = _to_vm_path(output)
+
+    r = run_in_vm(
+        [CLANG, "-target", "aarch64-linux-gnu", "-g", "-c",
+         vm_ll, "-o", vm_o]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to compile aarch64 .o from {ll_path.name}:\n{r.stderr}\n{r.stdout}"
+        )
+
+    r = run_in_vm(
+        [CLANG, "-target", "aarch64-linux-gnu", "-static",
+         vm_o, "-o", vm_output, "-lm"]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to link aarch64 binary:\n{r.stderr}\n{r.stdout}"
         )
     return output
 

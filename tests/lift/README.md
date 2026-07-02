@@ -110,6 +110,7 @@ All dev.py commands should be run from `tests/lift/` so output lands in
 cd tests/lift
 uv run python dev.py lift minirepro
 uv run python dev.py full minirepro
+uv run python asm_diff.py output/minirepro.asm-map.json output/minirepro.lifted_x86_64 --fn main
 ```
 
 `dev.py full` also produces `<case>.nodbg.ll` — source IR compiled with `-g0`
@@ -131,6 +132,7 @@ output/
 ├── minirepro.ll               # source IR, with dbg info
 ├── minirepro.lifted.ll        # lifted IR (inspect this)
 ├── minirepro.lift.log         # arm-lifter stdout/stderr (instruction-level debug)
+├── minirepro.asm-map.json     # structured ARM instruction correlation records
 ├── minirepro.lifted_x86_64    # x86_64 binary (re-ran from lifted IR)
 └── minirepro_arm64            # ARM64 reference binary (compiled from original .c)
 ```
@@ -145,6 +147,19 @@ Custom output directory:
 cd tests/lift
 uv run python dev.py -o /tmp/out lift maze_novarargs
 ```
+
+### Instruction Correlation
+
+`dev.py lift`, `full`, and `full-without-optimize` request
+`<case>.asm-map.json` from `arm-lifter`. The versioned sidecar is the
+machine-readable ARM-side source of truth for instruction correlation; the
+`.lift.log` remains diagnostic output only.
+
+Each `arm_inst_id` is local to one lifted function. `dwarf_line` is the
+synthetic line number attached to lifted IR as `arm_inst_id + 1`, using
+`arm_asm.s` as the debug file. `asm_diff.py` uses that line number to group
+zero or more recompiled target instructions. An ARM instruction may therefore
+be optimized away, and several target instructions may share one ARM record.
 
 ## Adding a new test case
 

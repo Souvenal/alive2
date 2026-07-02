@@ -93,6 +93,7 @@ public:
   // instead of creating a new one. Provides src-bc global variable
   // lookup priority for lazyAddGlobal().
   ObjectLiftContext *ObjCtx{nullptr};
+  InstructionMapFunction *InstructionMap{nullptr};
 
   const uint16_t NO_SPECIFIER = 0xfff;
 
@@ -129,7 +130,8 @@ public:
           std::unordered_map<unsigned, llvm::Instruction *> &lineMap,
           std::ostream *out, const llvm::Target *Targ, llvm::Triple DefaultTT,
           const char *DefaultCPU, const char *DefaultFeatures,
-          llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx)
+          llvm::Module &ExternalModule, ObjectLiftContext &ObjCtx,
+          InstructionMapFunction *InstructionMap)
       : DefaultCPU{DefaultCPU}, DefaultFeatures{DefaultFeatures},
         DefaultTT{DefaultTT}, Targ{Targ}, LiftedModule{&ExternalModule},
         Ctx{ExternalModule.getContext()}, srcFn{srcFn},
@@ -143,7 +145,7 @@ public:
             DefaultTT, MAI.get(), MRI.get(), STI.get(), &SrcMgr, &MCOptions)},
         MCE{Targ->createMCCodeEmitter(*MCII.get(), *MCCtx.get())},
         MB{std::move(MB)}, lineMap{lineMap}, out{out},
-        ObjCtx{&ObjCtx} {}
+        ObjCtx{&ObjCtx}, InstructionMap{InstructionMap} {}
 
   // these are ones that the backend adds to tgt, even when they don't
   // appear at all in src
@@ -1024,7 +1026,8 @@ public:
   void assertSame(llvm::Value *a, llvm::Value *b);
   void doDirectCall();
   llvm::Instruction *getCurLLVMInst();
-  void liftInst(llvm::MCInst &I);
+  std::string formatInst(const llvm::MCInst &I);
+  void liftInst(llvm::MCInst &I, const std::string &asmText);
   void invalidateReg(unsigned Reg, unsigned Width);
   void createRegStorage(unsigned Reg, unsigned Width, const std::string &Name);
   std::pair<llvm::Function *, llvm::Function *> run();
