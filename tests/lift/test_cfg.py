@@ -5,11 +5,13 @@ import pytest
 
 from asm_diff import parse_instruction_map
 from dev import cmd_viewer
+import cfg
 from cfg import (
     align_source_blocks_with_instruction_map,
     build_address_block_relations,
     build_block_relations,
     build_combined_cfg_dot,
+    build_combined_cfg_models,
     build_cfg,
     build_missing_function_report,
     build_relation_components,
@@ -484,14 +486,48 @@ def test_render_interactive_viewer_embeds_cfg_data(tmp_path) -> None:
     )
     document = Path(path).read_text(encoding="utf-8")
 
-    assert "const DATA =" in document
+    assert "const MODELS =" in document
     assert "Source group" in document
     assert "Group-level CFG" in document
     assert "Unmatched source" in document
     assert "DWARF provenance evidence" in document
     assert "Relation pairs for" in document
     assert "ARM IDs" in document
+    assert "function-select" in document
     assert "Select a block to inspect instructions" in document
+
+
+def test_build_combined_cfg_models_defaults_to_shared_functions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cfg,
+        "objdump",
+        lambda path, debug_file=None: ("arch", []),
+    )
+    function_sets = iter([
+        {"source_only": [], "foo": [], "bar": []},
+        {"target_only": [], "foo": [], "bar": []},
+    ])
+    monkeypatch.setattr(
+        cfg,
+        "collect_func_insns",
+        lambda instructions: next(function_sets),
+    )
+    built = []
+    monkeypatch.setattr(
+        cfg,
+        "_build_combined_cfg_model",
+        lambda *args: built.append(args[-1]) or {"function": args[-1]},
+    )
+
+    models = build_combined_cfg_models(
+        "source.o",
+        "target",
+        {"foo": {}, "bar": {}, "map_only": {}},
+        "arm_asm.s",
+    )
+
+    assert list(models) == ["bar", "foo"]
+    assert built == ["bar", "foo"]
 
 
 def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
@@ -523,8 +559,8 @@ def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
         lambda path: ("arm_asm.s", {"main": {}}),
     )
     monkeypatch.setattr(
-        "dev.build_combined_cfg_model",
-        lambda *args: calls.setdefault("model", args) or {"function": "main"},
+        "dev.build_combined_cfg_models",
+        lambda *args: calls.setdefault("models", args) or {"main": {"function": "main"}},
     )
 
     def render(model, outdir, src_obj, target, output_path):
@@ -541,7 +577,7 @@ def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
     cmd_viewer(
         source,
         output,
-        "main",
+        None,
         cleanup=True,
         extra_cflags=["-DMODE=1"],
     )
@@ -549,12 +585,12 @@ def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
     lift_args, lift_kwargs = calls["lift"]
     assert lift_args[:4] == (source_object, bc, lifted_ll, output / "sample.lift.log")
     assert lift_kwargs == {"cleanup": True, "asm_map": asm_map}
-    assert calls["model"] == (
+    assert calls["models"] == (
         str(source_object),
         str(lifted_binary),
         {"main": {}},
         "arm_asm.s",
-        "main",
+        None,
     )
     assert calls["render"][-1] == str(viewer)
     assert calls["browser_uri"] == viewer.resolve().as_uri()

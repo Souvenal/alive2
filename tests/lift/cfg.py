@@ -827,6 +827,26 @@ def build_combined_cfg_model(
     source_funcs = collect_func_insns(source_all)
     target_funcs = collect_func_insns(target_all)
 
+    return _build_combined_cfg_model(
+        source_arch,
+        source_funcs,
+        target_arch,
+        target_funcs,
+        instruction_map,
+        function,
+    )
+
+
+def _build_combined_cfg_model(
+    source_arch: str,
+    source_funcs: dict[str, list[dict]],
+    target_arch: str,
+    target_funcs: dict[str, list[dict]],
+    instruction_map: dict[str, dict[int, dict[str, object]]],
+    function: str,
+) -> dict:
+    """Build one model from already-disassembled source and target functions."""
+
     if function not in source_funcs:
         raise ValueError(f"function '{function}' not found in source object")
     if function not in target_funcs:
@@ -921,6 +941,43 @@ def build_combined_cfg_model(
     }
 
 
+def build_combined_cfg_models(
+    source_path: str,
+    target_path: str,
+    instruction_map: dict[str, dict[int, dict[str, object]]],
+    debug_file: str,
+    functions: list[str] | None = None,
+) -> dict[str, dict]:
+    """Build correlation models for all requested functions in one objdump pass."""
+    source_arch, source_all = objdump(source_path)
+    target_arch, target_all = objdump(target_path, debug_file)
+    source_funcs = collect_func_insns(source_all)
+    target_funcs = collect_func_insns(target_all)
+
+    available = set(instruction_map) & set(source_funcs) & set(target_funcs)
+    requested = functions if functions is not None else sorted(available)
+    if not requested:
+        raise ValueError("no functions are shared by instruction map and binaries")
+
+    models = {}
+    for function in requested:
+        if function not in instruction_map:
+            raise ValueError(f"function '{function}' not found in instruction map")
+        if function not in source_funcs:
+            raise ValueError(f"function '{function}' not found in source object")
+        if function not in target_funcs:
+            raise ValueError(f"function '{function}' not found in target binary")
+        models[function] = _build_combined_cfg_model(
+            source_arch,
+            source_funcs,
+            target_arch,
+            target_funcs,
+            instruction_map,
+            function,
+        )
+    return models
+
+
 def render_combined_cfg_from_model(
     model: dict,
     out_dir: str,
@@ -975,28 +1032,34 @@ def render_combined_cfg(
 
 
 def render_interactive_viewer(
-    model: dict,
+    models: dict[str, dict] | dict,
     out_dir: str,
     source_path: str,
     target_path: str,
     output_path: str | None = None,
 ) -> str:
     """Write a self-contained HTML block-correlation viewer."""
+    if "function" in models:
+        models = {models["function"]: models}
     viewer_data = {
-        "function": model["function"],
-        "source": model["source"],
-        "target": model["target"],
-        "report": model["report"],
+        function: {
+            "function": model["function"],
+            "source": model["source"],
+            "target": model["target"],
+            "report": model["report"],
+        }
+        for function, model in models.items()
     }
+    default_function = next(iter(viewer_data))
     data_json = json.dumps(viewer_data, separators=(",", ":")).replace(
         "</", "<\\/"
     )
     source_stem = Path(source_path).name
     target_stem = Path(target_path).name
     out_path = output_path or os.path.join(
-        out_dir, f"{source_stem}_vs_{target_stem}_{model['function']}.html"
+        out_dir, f"{source_stem}_vs_{target_stem}_cfg.html"
     )
-    title = html.escape(f"CFG correlation: {model['function']}")
+    title = html.escape("CFG correlation")
     document = """<!doctype html>
 <html lang="en">
 <head>
@@ -1032,6 +1095,7 @@ button { font: inherit; }
   background: #ffffff;
 }
 .title { font-weight: 700; font-size: 16px; }
+.function-select { min-width: 150px; margin-left: 8px; padding: 4px 6px; }
 .meta { color: var(--muted); font-size: 12px; }
 main { padding: 20px; }
 #overview { max-width: 1320px; margin: 0 auto; }
@@ -1258,7 +1322,7 @@ main { padding: 20px; }
 </head>
 <body>
 <header class="topbar">
-  <div class="title">__TITLE__</div>
+  <div class="title">__TITLE__ <select class="function-select" id="function-select" aria-label="Function"></select></div>
   <div class="meta" id="meta"></div>
 </header>
 <main>
@@ -1310,7 +1374,9 @@ main { padding: 20px; }
   </section>
 </main>
 <script>
-const DATA = __DATA__;
+const MODELS = __DATA__;
+const FUNCTION_NAMES = Object.keys(MODELS);
+let DATA = MODELS[__DEFAULT_FUNCTION_JSON__];
 const COLORS = [
   ["#2563eb", "#dbeafe"], ["#c2410c", "#ffedd5"],
   ["#15803d", "#dcfce7"], ["#7e22ce", "#f3e8ff"],
@@ -1558,6 +1624,20 @@ function openGroup(index) {
   renderRelationPicker();
   renderInstructions();
 }
+function resetDetail() {
+  state.group = null;
+  state.selection = null;
+  state.relation = null;
+  state.unmatchedIds = null;
+  document.querySelector("#detail").hidden = true;
+  document.querySelector("#overview").hidden = false;
+}
+function selectFunction(functionName) {
+  DATA = MODELS[functionName];
+  resetDetail();
+  text(document.querySelector("#meta"), `${DATA.source.arch} -> ${DATA.target.arch}`);
+  renderOverview();
+}
 function openUnmatched(side, armIds) {
   state.group = null;
   state.selection = null;
@@ -1802,13 +1882,17 @@ function renderInstructions() {
     : "No direct block relation evidence.");
 }
 document.querySelector("#back").addEventListener("click", () => {
-  state.group = null;
-  state.selection = null;
-  state.relation = null;
-  state.unmatchedIds = null;
-  document.querySelector("#detail").hidden = true;
-  document.querySelector("#overview").hidden = false;
+  resetDetail();
 });
+const functionSelect = document.querySelector("#function-select");
+for (const functionName of FUNCTION_NAMES) {
+  const option = document.createElement("option");
+  option.value = functionName;
+  text(option, functionName);
+  functionSelect.append(option);
+}
+functionSelect.value = DATA.function;
+functionSelect.addEventListener("change", () => selectFunction(functionSelect.value));
 text(document.querySelector("#meta"), `${DATA.source.arch} -> ${DATA.target.arch}`);
 renderOverview();
 </script>
@@ -1817,7 +1901,7 @@ renderOverview();
 """
     document = document.replace("__TITLE__", title).replace(
         "__DATA__", data_json
-    )
+    ).replace("__DEFAULT_FUNCTION_JSON__", json.dumps(default_function))
     Path(out_path).write_text(document, encoding="utf-8")
     return out_path
 

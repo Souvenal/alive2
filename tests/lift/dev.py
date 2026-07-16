@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from asm_diff import parse_instruction_map
-from cfg import build_combined_cfg_model, render_interactive_viewer
+from cfg import build_combined_cfg_models, render_interactive_viewer
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
@@ -262,7 +262,7 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
 def cmd_viewer(
     source: Path,
     outdir: Path,
-    function: str,
+    function: str | None,
     cleanup: bool,
     extra_cflags: list[str],
 ) -> None:
@@ -294,18 +294,18 @@ def cmd_viewer(
     lifted_binary = recompile_x86_64(lifted_ll, outdir)
     debug_file, instruction_map = parse_instruction_map(str(asm_map))
     try:
-        model = build_combined_cfg_model(
+        models = build_combined_cfg_models(
             str(source_object),
             str(lifted_binary),
             instruction_map,
             debug_file,
-            function,
+            [function] if function else None,
         )
     except (RuntimeError, ValueError) as error:
         sys.exit(f"Cannot build correlation viewer: {error}")
 
     viewer_path = render_interactive_viewer(
-        model,
+        models,
         str(outdir),
         str(source_object),
         str(lifted_binary),
@@ -391,8 +391,8 @@ def main() -> None:
     )
     p.add_argument("source", type=Path)
     p.add_argument(
-        "-f", "--function", default="main",
-        help="function to visualize (default: main)",
+        "-f", "--function",
+        help="visualize only this function (default: all correlated functions)",
     )
     p.add_argument(
         "--without-cleanup", action="store_true",

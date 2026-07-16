@@ -122,8 +122,10 @@ uv run python dev.py viewer cases/minirepro.c
 This compiles the source to ARM64 `.o` and `.bc`, lifts it with an instruction
 map, recompiles the lifted IR to x86_64, writes
 `output/minirepro.cfg-viewer.html`, and opens it in the default browser. It
-visualizes `main` by default; choose another function with `-f <function>`.
-Use `--without-cleanup` to inspect the raw lifted IR, and repeat
+includes every function shared by the instruction map, original object, and
+lifted binary. Use the function selector in the HTML to switch views, or pass
+`-f <function>` to generate a viewer containing only one function. Use
+`--without-cleanup` to inspect the raw lifted IR, and repeat
 `--cflag=<flag>` for source-specific compiler flags.
 
 `dev.py full` also produces `<case>.nodbg.ll` — source IR compiled with `-g0`
