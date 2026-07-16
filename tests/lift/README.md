@@ -161,6 +161,46 @@ synthetic line number attached to lifted IR as `arm_inst_id + 1`, using
 zero or more recompiled target instructions. An ARM instruction may therefore
 be optimized away, and several target instructions may share one ARM record.
 
+### Basic-Block Correlation
+
+`cfg.py --asm-map` lifts the instruction-level DWARF relation into an
+unweighted many-to-many relation between source MC blocks and target machine
+blocks:
+
+```bash
+uv run python cfg.py output/minirepro.lifted_arm64 \
+  --asm-map output/minirepro.asm-map.json \
+  -f main --text
+```
+
+Write the relation evidence as JSON:
+
+```bash
+uv run python cfg.py output/minirepro.lifted_x86_64 \
+  --asm-map output/minirepro.asm-map.json \
+  -f main --relations-json output/minirepro.block-relations.json
+```
+
+Each relation records the deduplicated `arm_inst_ids` that connect a source
+`mc_block` to a target address block. Empty assembly records, `SEH_Nop`, and
+the synthetic entry branch are excluded. No score or one-to-one matching is
+imposed.
+
+Render the original and lifted CFGs in one image:
+
+```bash
+uv run python cfg.py output/minirepro.lifted_x86_64 \
+  --source-object output/minirepro.o \
+  --asm-map output/minirepro.asm-map.json \
+  -f main
+```
+
+The source CFG is drawn on the left and the lifted CFG on the right. Each
+connected component of the many-to-many block relation gets matching colored
+frames on both sides and a bidirectional arrow between the frames. Original
+object instructions are aligned to non-synthetic `arm_inst_id` records in
+instruction order; a count mismatch is reported as an error.
+
 ## Adding a new test case
 
 1. Put `<name>.c` into `cases/`

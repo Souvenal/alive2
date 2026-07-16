@@ -41,18 +41,36 @@ def parse_instruction_map(
         instructions = function.get("instructions")
         if not isinstance(name, str) or not isinstance(instructions, list):
             sys.exit(f"Malformed function record in '{map_path}'")
+        if name in arm:
+            sys.exit(f"Duplicate function '{name}' in '{map_path}'")
         by_id: dict[int, dict[str, object]] = {}
+        dwarf_lines: set[int] = set()
         for instruction in instructions:
             if not isinstance(instruction, dict):
                 sys.exit(f"Malformed instruction record in '{map_path}'")
             arm_inst_id = instruction.get("arm_inst_id")
             dwarf_line = instruction.get("dwarf_line")
+            mc_block = instruction.get("mc_block")
+            opcode = instruction.get("opcode")
             asm = instruction.get("asm")
-            if (not isinstance(arm_inst_id, int)
-                    or not isinstance(dwarf_line, int)
+            if (type(arm_inst_id) is not int
+                    or type(dwarf_line) is not int
+                    or not isinstance(mc_block, str)
+                    or not isinstance(opcode, str)
                     or not isinstance(asm, str)):
                 sys.exit(f"Malformed instruction record in '{map_path}'")
+            if arm_inst_id in by_id:
+                sys.exit(
+                    f"Duplicate arm_inst_id {arm_inst_id} for '{name}' "
+                    f"in '{map_path}'"
+                )
+            if dwarf_line in dwarf_lines:
+                sys.exit(
+                    f"Duplicate dwarf_line {dwarf_line} for '{name}' "
+                    f"in '{map_path}'"
+                )
             by_id[arm_inst_id] = instruction
+            dwarf_lines.add(dwarf_line)
         arm[name] = by_id
 
     return debug_file, arm
