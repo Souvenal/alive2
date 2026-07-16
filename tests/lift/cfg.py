@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -813,16 +814,14 @@ def build_combined_cfg_dot(
     return '\n'.join(lines)
 
 
-def render_combined_cfg(
+def build_combined_cfg_model(
     source_path: str,
     target_path: str,
     instruction_map: dict[str, dict[int, dict[str, object]]],
     debug_file: str,
     function: str,
-    out_dir: str,
-    fmt: str,
-) -> tuple[str, dict]:
-    """Render original and lifted CFGs with framed relation components."""
+) -> dict:
+    """Build source/target CFG data and relation components for one function."""
     source_arch, source_all = objdump(source_path)
     target_arch, target_all = objdump(target_path, debug_file)
     source_funcs = collect_func_insns(source_all)
@@ -857,20 +856,93 @@ def render_combined_cfg(
         "target_function_missing": False,
     })
 
+    line_to_arm_inst = {
+        instruction["dwarf_line"]: arm_inst_id
+        for arm_inst_id, instruction in source_instructions.items()
+        if is_correlatable_source_instruction(instruction)
+    }
+
+    def block_data(
+        blocks: list[tuple[str, list[dict]]],
+        is_source: bool,
+    ) -> list[dict]:
+        result = []
+        for block_name, instructions in blocks:
+            output_instructions = []
+            for instruction in instructions:
+                output_instruction = {
+                    "address": f"{instruction['addr']:x}",
+                    "text": instruction["raw"],
+                }
+                if is_source:
+                    output_instruction["arm_inst_id"] = instruction.get(
+                        "arm_inst_id"
+                    )
+                    output_instruction["mc_block"] = instruction.get(
+                        "mc_block"
+                    )
+                else:
+                    output_instruction["dwarf_line"] = instruction.get(
+                        "dwarf_line"
+                    )
+                    output_instruction["arm_inst_id"] = line_to_arm_inst.get(
+                        instruction.get("dwarf_line")
+                    )
+                output_instructions.append(output_instruction)
+            result.append({
+                "id": block_name,
+                "instructions": output_instructions,
+            })
+        return result
+
+    return {
+        "function": function,
+        "source": {
+            "arch": source_arch,
+            "blocks": block_data(source_blocks, True),
+            "edges": [
+                {"source": source, "target": target, "label": label}
+                for source, target, label in source_edges
+            ],
+        },
+        "target": {
+            "arch": target_arch,
+            "blocks": block_data(target_blocks, False),
+            "edges": [
+                {"source": source, "target": target, "label": label}
+                for source, target, label in target_edges
+            ],
+        },
+        "report": report,
+        "_source_blocks": source_blocks,
+        "_source_edges": source_edges,
+        "_target_blocks": target_blocks,
+        "_target_edges": target_edges,
+    }
+
+
+def render_combined_cfg_from_model(
+    model: dict,
+    out_dir: str,
+    source_path: str,
+    target_path: str,
+    fmt: str,
+) -> tuple[str, dict]:
+    """Render a Graphviz combined CFG from a prepared model."""
     dot_source = build_combined_cfg_dot(
-        function,
-        source_arch,
-        source_blocks,
-        source_edges,
-        target_arch,
-        target_blocks,
-        target_edges,
-        components,
+        model["function"],
+        model["source"]["arch"],
+        model["_source_blocks"],
+        model["_source_edges"],
+        model["target"]["arch"],
+        model["_target_blocks"],
+        model["_target_edges"],
+        model["report"]["components"],
     )
     dot = require_tool("dot")
     source_stem = Path(source_path).name
     target_stem = Path(target_path).name
-    out_name = f"{source_stem}_vs_{target_stem}_{function}.{fmt}"
+    out_name = f"{source_stem}_vs_{target_stem}_{model['function']}.{fmt}"
     out_path = os.path.join(out_dir, out_name)
     result = subprocess.run(
         [dot, f"-T{fmt}", "-o", out_path],
@@ -881,7 +953,873 @@ def render_combined_cfg(
     if result.returncode != 0:
         raise RuntimeError(f"dot error: {result.stderr.strip()}")
 
-    return out_path, report
+    return out_path, model["report"]
+
+
+def render_combined_cfg(
+    source_path: str,
+    target_path: str,
+    instruction_map: dict[str, dict[int, dict[str, object]]],
+    debug_file: str,
+    function: str,
+    out_dir: str,
+    fmt: str,
+) -> tuple[str, dict]:
+    """Render original and lifted CFGs with framed relation components."""
+    model = build_combined_cfg_model(
+        source_path, target_path, instruction_map, debug_file, function
+    )
+    return render_combined_cfg_from_model(
+        model, out_dir, source_path, target_path, fmt
+    )
+
+
+def render_interactive_viewer(
+    model: dict,
+    out_dir: str,
+    source_path: str,
+    target_path: str,
+    output_path: str | None = None,
+) -> str:
+    """Write a self-contained HTML block-correlation viewer."""
+    viewer_data = {
+        "function": model["function"],
+        "source": model["source"],
+        "target": model["target"],
+        "report": model["report"],
+    }
+    data_json = json.dumps(viewer_data, separators=(",", ":")).replace(
+        "</", "<\\/"
+    )
+    source_stem = Path(source_path).name
+    target_stem = Path(target_path).name
+    out_path = output_path or os.path.join(
+        out_dir, f"{source_stem}_vs_{target_stem}_{model['function']}.html"
+    )
+    title = html.escape(f"CFG correlation: {model['function']}")
+    document = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  color-scheme: light;
+  --ink: #172033;
+  --muted: #64748b;
+  --line: #cbd5e1;
+  --canvas: #f8fafc;
+  --source: #1d4ed8;
+  --target: #c2410c;
+  --selected: #fef3c7;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-width: 960px;
+  color: var(--ink);
+  background: #ffffff;
+  font: 14px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+button { font: inherit; }
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  background: #ffffff;
+}
+.title { font-weight: 700; font-size: 16px; }
+.meta { color: var(--muted); font-size: 12px; }
+main { padding: 20px; }
+#overview { max-width: 1320px; margin: 0 auto; }
+.overview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.overview-head strong { font-size: 13px; }
+.overview-canvas {
+  height: 490px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--canvas);
+}
+.overview-inner { position: relative; min-width: 100%; min-height: 100%; }
+.overview-graphs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.overview-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.overview-panel header {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.overview-links {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+.overview-link {
+  border: 0;
+  border-top: 2px dashed var(--group);
+  border-bottom: 2px dashed var(--group);
+  color: var(--group);
+  background: #ffffff;
+  padding: 7px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.group-node {
+  position: absolute;
+  width: 198px;
+  min-height: 72px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--group);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--group-fill);
+  text-align: left;
+  cursor: pointer;
+}
+.group-node:hover { border-color: var(--group); }
+.group-node strong { display: block; }
+.group-node small { display: block; color: var(--muted); margin-top: 5px; }
+.group-node.unmatched { background: #f1f5f9; border-left-color: #64748b; }
+.unmatched {
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  background: var(--canvas);
+}
+#detail[hidden], #overview[hidden] { display: none; }
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.detail-head h2 { margin: 0; font-size: 16px; }
+.back {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #ffffff;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.graphs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  min-height: 430px;
+}
+.graph-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #ffffff;
+}
+.graph-panel header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 700;
+}
+.source-header { color: var(--source); }
+.target-header { color: var(--target); }
+.graph-canvas {
+  position: relative;
+  height: 380px;
+  overflow: auto;
+  background: var(--canvas);
+}
+.graph-inner { position: relative; min-width: 100%; min-height: 100%; }
+.edge-layer { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.edge-layer path { stroke: #94a3b8; stroke-width: 1.4; fill: none; }
+.block-node {
+  position: absolute;
+  width: 198px;
+  min-height: 58px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--side);
+  border-radius: 5px;
+  color: var(--ink);
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+.block-node:hover { border-color: var(--side); }
+.block-node.selected { background: var(--selected); box-shadow: 0 0 0 2px var(--side); }
+.block-node.related { border-color: var(--group); box-shadow: 0 0 0 2px var(--group); }
+.block-node.paired { background: #ecfdf5; box-shadow: 0 0 0 2px #15803d; }
+.block-id { display: block; font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.block-summary { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.relation-panel {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.relation-panel h3 { margin: 0 0 8px; font-size: 14px; }
+.relation-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.relation-pair {
+  border: 1px solid var(--line);
+  border-left: 4px solid #15803d;
+  border-radius: 5px;
+  color: var(--ink);
+  background: #ffffff;
+  padding: 7px 9px;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+.relation-pair:hover, .relation-pair.selected {
+  border-color: #15803d;
+  background: #ecfdf5;
+}
+.instruction-panel {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.instruction-panel h3 { margin: 0 0 8px; font-size: 14px; }
+.correlation-list {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #ffffff;
+}
+.correlation-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) minmax(0, 1fr);
+  border-bottom: 1px solid #e2e8f0;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.correlation-row:last-child { border-bottom: 0; }
+.correlation-row > span {
+  min-width: 0;
+  padding: 6px 8px;
+  border-right: 1px solid #e2e8f0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.correlation-row > span:last-child { border-right: 0; }
+.correlation-row.header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  background: #f8fafc;
+  font: 700 11px/1.35 Inter, ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase;
+}
+.correlation-id { color: #475569; font-weight: 700; }
+.correlation-source { background: #eff6ff; }
+.correlation-target { background: #fff7ed; }
+.instruction-list {
+  max-height: 250px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #ffffff;
+}
+.instruction {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #e2e8f0;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.instruction:last-child { border-bottom: 0; }
+.instruction-id { color: #475569; }
+.instruction.mapped { background: #eff6ff; }
+.related-list { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="title">__TITLE__</div>
+  <div class="meta" id="meta"></div>
+</header>
+<main>
+  <section id="overview">
+    <div class="overview-head">
+      <strong>Group-level CFG</strong>
+      <span class="meta">Blue edges: original CFG. Orange edges: lifted CFG.</span>
+    </div>
+    <div class="overview-graphs">
+      <section class="overview-panel">
+        <header>Original CFG groups</header>
+        <div class="overview-canvas"><div class="overview-inner" id="overview-source"></div></div>
+      </section>
+      <div class="overview-links" id="overview-links"></div>
+      <section class="overview-panel">
+        <header>Lifted CFG groups</header>
+        <div class="overview-canvas"><div class="overview-inner" id="overview-target"></div></div>
+      </section>
+    </div>
+    <div class="unmatched" id="unmatched"></div>
+  </section>
+  <section id="detail" hidden>
+    <div class="detail-head">
+      <button class="back" id="back">Back to groups</button>
+      <h2 id="detail-title"></h2>
+      <div class="meta" id="detail-meta"></div>
+    </div>
+    <div class="graphs">
+      <section class="graph-panel">
+        <header class="source-header" id="source-title"></header>
+        <div class="graph-canvas"><div class="graph-inner" id="source-graph"></div></div>
+      </section>
+      <section class="graph-panel">
+        <header class="target-header" id="target-title"></header>
+        <div class="graph-canvas"><div class="graph-inner" id="target-graph"></div></div>
+      </section>
+    </div>
+    <section class="relation-panel">
+      <h3 id="relation-title">Select a block to inspect relation pairs</h3>
+      <div class="relation-picker" id="relation-picker"></div>
+    </section>
+    <section class="instruction-panel">
+      <h3 id="correlation-title">Select a relation pair to inspect DWARF provenance evidence</h3>
+      <div class="correlation-list" id="correlation-list"></div>
+      <h3 id="instruction-title">Selected block instructions</h3>
+      <div class="instruction-list" id="instruction-list"></div>
+      <div class="related-list" id="related-list"></div>
+    </section>
+  </section>
+</main>
+<script>
+const DATA = __DATA__;
+const COLORS = [
+  ["#2563eb", "#dbeafe"], ["#c2410c", "#ffedd5"],
+  ["#15803d", "#dcfce7"], ["#7e22ce", "#f3e8ff"],
+  ["#a21caf", "#fae8ff"], ["#0f766e", "#ccfbf1"]
+];
+const state = { group: null, selection: null, relation: null };
+function text(node, value) { node.textContent = value; }
+function blockMap(side) {
+  return new Map(DATA[side].blocks.map(block => [block.id, block]));
+}
+function relatedBlocks(side, id) {
+  const out = new Set();
+  for (const relation of DATA.report.address_relations) {
+    if (side === "source" && relation.source_block === id) out.add(relation.target_block);
+    if (side === "target" && relation.target_block === id) out.add(relation.source_block);
+  }
+  return out;
+}
+function relationsForBlock(side, id) {
+  return DATA.report.address_relations.filter(relation =>
+    side === "source"
+      ? relation.source_block === id
+      : relation.target_block === id
+  );
+}
+function relationForBlocks(left, right) {
+  const source = left.side === "source" ? left.id : right.id;
+  const target = left.side === "target" ? left.id : right.id;
+  return DATA.report.address_relations.find(relation =>
+    relation.source_block === source && relation.target_block === target
+  ) || null;
+}
+function idsForBlock(side, block) {
+  return [...new Set(block.instructions.map(insn => insn.arm_inst_id).filter(x => x !== null && x !== undefined))];
+}
+function instructionsForIds(side, blockIds, armId) {
+  const blocks = blockMap(side);
+  const result = [];
+  for (const blockId of blockIds) {
+    const block = blocks.get(blockId);
+    if (!block) continue;
+    for (const instruction of block.instructions) {
+      if (instruction.arm_inst_id === armId) {
+        result.push(`${blockId}: ${instruction.text}`);
+      }
+    }
+  }
+  return result;
+}
+function relationInstructionCorrespondence(relation) {
+  return relation.arm_inst_ids.map(armId => ({
+    armId,
+    source: instructionsForIds("source", [relation.source_block], armId),
+    target: instructionsForIds("target", [relation.target_block], armId),
+  }));
+}
+function addCorrelationRow(root, id, source, target, header = false) {
+  const row = document.createElement("div");
+  row.className = `correlation-row${header ? " header" : ""}`;
+  const cells = [
+    ["correlation-id", id],
+    ["correlation-source", source],
+    ["correlation-target", target],
+  ];
+  for (const [className, value] of cells) {
+    const cell = document.createElement("span");
+    cell.className = className;
+    text(cell, value);
+    row.append(cell);
+  }
+  root.append(row);
+}
+function createOverviewGroups() {
+  const source = [], target = [];
+  DATA.report.components.forEach((component, index) => {
+    const [color, fill] = COLORS[index % COLORS.length];
+    source.push({
+      id: `group-${index}`, kind: "matched", side: "source", index, color, fill,
+      label: `Source group ${index + 1}`, blockIds: component.source_blocks,
+      armIds: component.arm_inst_ids
+    });
+    target.push({
+      id: `group-${index}`, kind: "matched", side: "target", index, color, fill,
+      label: `Lifted group ${index + 1}`, blockIds: component.target_blocks,
+      armIds: component.arm_inst_ids
+    });
+  });
+  if (DATA.report.unmatched_source_blocks.length || DATA.report.unmatched_arm_inst_ids.length) {
+    source.push({
+      id: "unmatched-source", kind: "unmatched", side: "source", color: "#64748b", fill: "#f1f5f9",
+      label: "Unmatched source", blockIds: DATA.report.unmatched_source_blocks,
+      armIds: DATA.report.unmatched_arm_inst_ids
+    });
+  }
+  if (DATA.report.unmatched_target_blocks.length) {
+    target.push({
+      id: "unmatched-target", kind: "unmatched", side: "target", color: "#64748b", fill: "#f1f5f9",
+      label: "Unmatched lifted", blockIds: DATA.report.unmatched_target_blocks,
+      armIds: []
+    });
+  }
+  return { source, target };
+}
+function groupMembership(groups) {
+  const membership = new Map();
+  groups.forEach(group => group.blockIds.forEach(block => membership.set(block, group.id)));
+  return membership;
+}
+function groupEdges(side, groups) {
+  const membership = groupMembership(groups);
+  const edges = new Map();
+  for (const edge of DATA[side].edges) {
+    const source = membership.get(edge.source);
+    const target = membership.get(edge.target);
+    if (!source || !target || source === target) continue;
+    edges.set(`${source}:${target}`, { source, target });
+  }
+  return [...edges.values()];
+}
+function layoutGroupNodes(groups, edges) {
+  const level = blockLevels(groups, edges);
+  const columns = new Map();
+  groups.forEach(group => {
+    const current = level.get(group.id);
+    if (!columns.has(current)) columns.set(current, []);
+    columns.get(current).push(group);
+  });
+  const positions = new Map();
+  let maxY = 0;
+  for (const [current, column] of columns) {
+    column.forEach((group, index) => {
+      const position = { x: current * 230, y: 42 + index * 102 };
+      positions.set(group.id, position);
+      maxY = Math.max(maxY, position.y + 76);
+    });
+  }
+  return {
+    positions,
+    width: Math.max(220, (Math.max(0, ...level.values()) + 1) * 230),
+    height: Math.max(150, maxY + 24)
+  };
+}
+function makeSvg(width, height) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "edge-layer");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.innerHTML = `<defs>
+    <marker id="overview-source-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#1d4ed8"/></marker>
+    <marker id="overview-target-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#c2410c"/></marker>
+    <marker id="overview-match-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#475569"/></marker>
+  </defs>`;
+  return svg;
+}
+function appendEdge(svg, from, to, color, marker, dashed, label, bidirectional = false) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  let x1 = from.x + 198, y1 = from.y + 30, x2 = to.x, y2 = to.y + 30;
+  if (bidirectional) {
+    x1 += 8;
+    x2 -= 8;
+  }
+  path.setAttribute("d", `M ${x1} ${y1} C ${x1 + 28} ${y1}, ${x2 - 28} ${y2}, ${x2} ${y2}`);
+  path.setAttribute("stroke", color);
+  path.setAttribute("marker-end", `url(#${marker})`);
+  if (bidirectional) path.setAttribute("marker-start", `url(#${marker})`);
+  if (dashed) path.setAttribute("stroke-dasharray", "5 4");
+  svg.append(path);
+  if (label) {
+    const textNode = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    textNode.setAttribute("x", (x1 + x2) / 2);
+    textNode.setAttribute("y", (y1 + y2) / 2 - 7);
+    textNode.setAttribute("text-anchor", "middle");
+    textNode.setAttribute("fill", color);
+    textNode.setAttribute("font-size", "11");
+    textNode.textContent = label;
+    svg.append(textNode);
+  }
+}
+function renderOverview() {
+  const groups = createOverviewGroups();
+  const sourceEdges = groupEdges("source", groups.source);
+  const targetEdges = groupEdges("target", groups.target);
+  renderOverviewSide("overview-source", groups.source, sourceEdges, "#1d4ed8", "overview-source-arrow");
+  renderOverviewSide("overview-target", groups.target, targetEdges, "#c2410c", "overview-target-arrow");
+  const links = document.querySelector("#overview-links");
+  links.replaceChildren();
+  DATA.report.components.forEach((component, index) => {
+    const [color] = COLORS[index % COLORS.length];
+    const link = document.createElement("button");
+    link.className = "overview-link";
+    link.style.setProperty("--group", color);
+    text(link, `<-> ${component.arm_inst_ids.length} IDs`);
+    link.addEventListener("click", () => openGroup(index));
+    links.append(link);
+  });
+  const unmatched = document.querySelector("#unmatched");
+  text(unmatched,
+    `Unmatched source blocks: ${DATA.report.unmatched_source_blocks.length}; ` +
+    `unmatched target blocks: ${DATA.report.unmatched_target_blocks.length}; ` +
+    `unmatched ARM instructions: ${DATA.report.unmatched_arm_inst_ids.length}.`);
+}
+function renderOverviewSide(rootId, groups, edges, color, marker) {
+  const root = document.querySelector(`#${rootId}`);
+  root.replaceChildren();
+  const layout = layoutGroupNodes(groups, edges);
+  root.style.width = `${layout.width + 24}px`;
+  root.style.height = `${Math.max(400, layout.height)}px`;
+  const svg = makeSvg(layout.width + 24, Math.max(400, layout.height));
+  for (const edge of edges) {
+    appendEdge(svg, layout.positions.get(edge.source), layout.positions.get(edge.target), color, marker, false);
+  }
+  root.append(svg);
+  for (const group of groups) addOverviewNode(root, group, layout.positions.get(group.id));
+}
+function addOverviewNode(root, group, position) {
+  const button = document.createElement("button");
+  button.className = `group-node ${group.kind === "unmatched" ? "unmatched" : ""}`;
+  button.style.left = `${position.x + 12}px`;
+  button.style.top = `${position.y}px`;
+  button.style.setProperty("--group", group.color);
+  button.style.setProperty("--group-fill", group.fill);
+  button.title = `Open ${group.label}`;
+  button.innerHTML = `<strong>${group.label}</strong><small>${group.blockIds.length} blocks, ${group.armIds.length} ARM IDs</small>`;
+  button.addEventListener("click", () => {
+    if (group.kind === "matched") openGroup(group.index);
+    else openUnmatched(group.side, group.armIds);
+  });
+  root.append(button);
+}
+function openGroup(index) {
+  state.group = index;
+  state.selection = null;
+  state.relation = null;
+  state.unmatchedIds = null;
+  document.querySelector("#overview").hidden = true;
+  document.querySelector("#detail").hidden = false;
+  const component = DATA.report.components[index];
+  text(document.querySelector("#detail-title"), `Group ${index + 1}`);
+  text(document.querySelector("#detail-meta"),
+    `${component.source_blocks.length} source blocks <-> ${component.target_blocks.length} lifted blocks`);
+  text(document.querySelector("#source-title"), `Original CFG (${DATA.source.arch})`);
+  text(document.querySelector("#target-title"), `Lifted CFG (${DATA.target.arch})`);
+  renderGraph("source", component.source_blocks);
+  renderGraph("target", component.target_blocks);
+  renderRelationPicker();
+  renderInstructions();
+}
+function openUnmatched(side, armIds) {
+  state.group = null;
+  state.selection = null;
+  state.relation = null;
+  state.unmatchedIds = armIds;
+  document.querySelector("#overview").hidden = true;
+  document.querySelector("#detail").hidden = false;
+  text(document.querySelector("#detail-title"), `Unmatched ${side === "source" ? "source" : "lifted"} blocks`);
+  text(document.querySelector("#detail-meta"), `${armIds.length} unmatched ARM IDs`);
+  text(document.querySelector("#source-title"), `Original CFG (${DATA.source.arch})`);
+  text(document.querySelector("#target-title"), `Lifted CFG (${DATA.target.arch})`);
+  renderGraph("source", side === "source" ? DATA.report.unmatched_source_blocks : []);
+  renderGraph("target", side === "target" ? DATA.report.unmatched_target_blocks : []);
+  renderRelationPicker();
+  renderInstructions();
+}
+function blockLevels(blocks, edges) {
+  const ids = new Set(blocks.map(block => block.id));
+  const outgoing = new Map(blocks.map(block => [block.id, []]));
+  const incoming = new Map(blocks.map(block => [block.id, 0]));
+  for (const edge of edges) {
+    if (!ids.has(edge.source) || !ids.has(edge.target)) continue;
+    outgoing.get(edge.source).push(edge.target);
+    incoming.set(edge.target, incoming.get(edge.target) + 1);
+  }
+  const queue = blocks.filter(block => incoming.get(block.id) === 0).map(block => block.id);
+  if (!queue.length && blocks.length) queue.push(blocks[0].id);
+  const level = new Map(queue.map(id => [id, 0]));
+  for (let i = 0; i < queue.length; ++i) {
+    const source = queue[i];
+    for (const target of outgoing.get(source)) {
+      if (!level.has(target)) {
+        level.set(target, level.get(source) + 1);
+        queue.push(target);
+      }
+    }
+  }
+  let fallback = Math.max(0, ...level.values()) + 1;
+  for (const block of blocks) if (!level.has(block.id)) level.set(block.id, fallback++);
+  return level;
+}
+function renderGraph(side, allowedIds) {
+  const root = document.querySelector(`#${side}-graph`);
+  root.replaceChildren();
+  const allowed = new Set(allowedIds);
+  const blocks = DATA[side].blocks.filter(block => allowed.has(block.id));
+  const edges = DATA[side].edges.filter(edge => allowed.has(edge.source) && allowed.has(edge.target));
+  const levels = blockLevels(blocks, edges);
+  const columns = new Map();
+  for (const block of blocks) {
+    const level = levels.get(block.id);
+    if (!columns.has(level)) columns.set(level, []);
+    columns.get(level).push(block);
+  }
+  const positions = new Map();
+  let maxY = 0;
+  for (const [level, column] of columns) {
+    column.forEach((block, index) => {
+      const position = { x: 24 + level * 240, y: 24 + index * 94 };
+      positions.set(block.id, position);
+      maxY = Math.max(maxY, position.y + 72);
+    });
+  }
+  const width = Math.max(440, 80 + (Math.max(0, ...levels.values()) + 1) * 240);
+  root.style.width = `${width}px`;
+  root.style.height = `${Math.max(360, maxY + 24)}px`;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "edge-layer");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", root.style.height);
+  svg.innerHTML = `<defs><marker id="${side}-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#94a3b8"/></marker></defs>`;
+  for (const edge of edges) {
+    const from = positions.get(edge.source);
+    const to = positions.get(edge.target);
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const x1 = from.x + 198, y1 = from.y + 28, x2 = to.x, y2 = to.y + 28;
+    path.setAttribute("d", `M ${x1} ${y1} C ${x1 + 30} ${y1}, ${x2 - 30} ${y2}, ${x2} ${y2}`);
+    path.setAttribute("marker-end", `url(#${side}-arrow)`);
+    svg.append(path);
+  }
+  root.append(svg);
+  for (const block of blocks) {
+    const position = positions.get(block.id);
+    const button = document.createElement("button");
+    button.className = "block-node";
+    button.style.left = `${position.x}px`;
+    button.style.top = `${position.y}px`;
+    button.style.setProperty("--side", side === "source" ? "#1d4ed8" : "#c2410c");
+    button.dataset.side = side;
+    button.dataset.block = block.id;
+    button.innerHTML = `<span class="block-id">${block.id}</span><span class="block-summary">${block.instructions.length} instructions, ${idsForBlock(side, block).length} ARM IDs</span>`;
+    button.addEventListener("click", () => selectBlock(side, block.id));
+    root.append(button);
+  }
+  updateHighlights();
+}
+function selectBlock(side, id) {
+  const selected = { side, id };
+  const relation = state.selection && state.selection.side !== side
+    ? relationForBlocks(state.selection, selected)
+    : null;
+  state.selection = selected;
+  state.relation = relation;
+  updateHighlights();
+  renderRelationPicker();
+  renderInstructions();
+}
+function updateHighlights() {
+  document.querySelectorAll(".block-node").forEach(node => {
+    node.classList.remove("selected", "related", "paired");
+    if (!state.selection) return;
+    if (node.dataset.side === state.selection.side && node.dataset.block === state.selection.id) {
+      node.classList.add("selected");
+      return;
+    }
+    if (state.relation &&
+        node.dataset.side !== state.selection.side &&
+        ((node.dataset.side === "source" && node.dataset.block === state.relation.source_block) ||
+         (node.dataset.side === "target" && node.dataset.block === state.relation.target_block))) {
+      node.classList.add("paired");
+      return;
+    }
+    if (node.dataset.side !== state.selection.side &&
+        relatedBlocks(state.selection.side, state.selection.id).has(node.dataset.block)) {
+      node.classList.add("related");
+    }
+  });
+}
+function sameRelation(left, right) {
+  return left && right &&
+    left.source_block === right.source_block &&
+    left.target_block === right.target_block;
+}
+function selectRelation(relation) {
+  state.relation = relation;
+  updateHighlights();
+  renderRelationPicker();
+  renderInstructions();
+}
+function renderRelationPicker() {
+  const title = document.querySelector("#relation-title");
+  const picker = document.querySelector("#relation-picker");
+  picker.replaceChildren();
+  if (!state.selection) {
+    text(title, "Select a block to inspect relation pairs");
+    return;
+  }
+  const relations = relationsForBlock(state.selection.side, state.selection.id);
+  text(
+    title,
+    `Relation pairs for ${state.selection.side === "source" ? "original" : "lifted"} block ${state.selection.id}`,
+  );
+  for (const relation of relations) {
+    const button = document.createElement("button");
+    button.className = `relation-pair${sameRelation(relation, state.relation) ? " selected" : ""}`;
+    text(
+      button,
+      `${relation.source_block} <-> ${relation.target_block} (${relation.arm_inst_ids.length} ARM IDs)`,
+    );
+    button.addEventListener("click", () => selectRelation(relation));
+    picker.append(button);
+  }
+}
+function renderInstructions() {
+  const correlationTitle = document.querySelector("#correlation-title");
+  const correlationList = document.querySelector("#correlation-list");
+  const title = document.querySelector("#instruction-title");
+  const list = document.querySelector("#instruction-list");
+  const related = document.querySelector("#related-list");
+  correlationList.replaceChildren();
+  list.replaceChildren();
+  if (!state.selection) {
+    if (state.unmatchedIds && state.unmatchedIds.length) {
+      text(correlationTitle, "No direct target instruction correspondence");
+      addCorrelationRow(correlationList, "ARM ID", "Original", "Lifted", true);
+      addCorrelationRow(
+        correlationList,
+        "Unmatched",
+        `${state.unmatchedIds.length} ARM IDs have no target block evidence.`,
+        "No direct mapped target instruction.",
+      );
+      text(title, "Unmatched ARM instructions");
+      const allSource = DATA.source.blocks.flatMap(block => block.instructions);
+      for (const instruction of allSource.filter(insn => state.unmatchedIds.includes(insn.arm_inst_id))) {
+        const row = document.createElement("div");
+        row.className = "instruction";
+        row.innerHTML = `<span class="instruction-id"></span><span></span>`;
+        text(row.children[0], `ARM #${instruction.arm_inst_id}`);
+        text(row.children[1], instruction.text);
+        list.append(row);
+      }
+      text(related, "These instructions have no direct target block evidence.");
+      return;
+    }
+    text(correlationTitle, "Select a relation pair to inspect DWARF provenance evidence");
+    text(title, "Select a block to inspect instructions");
+    text(related, "");
+    return;
+  }
+  const block = blockMap(state.selection.side).get(state.selection.id);
+  if (state.relation) {
+    const correspondences = relationInstructionCorrespondence(state.relation);
+    text(
+      correlationTitle,
+      `DWARF provenance evidence: ${state.relation.source_block} <-> ${state.relation.target_block}`,
+    );
+    addCorrelationRow(correlationList, "ARM ID", "Original", "Lifted", true);
+    for (const correspondence of correspondences) {
+      addCorrelationRow(
+        correlationList,
+        `ARM #${correspondence.armId}`,
+        correspondence.source.join("\\n") || "(no instruction found)",
+        correspondence.target.join("\\n") || "(no instruction found)",
+      );
+    }
+  } else {
+    text(correlationTitle, "Select a relation pair to inspect DWARF provenance evidence");
+    addCorrelationRow(correlationList, "Relation pair", "Original", "Lifted", true);
+    addCorrelationRow(
+      correlationList,
+      "Waiting",
+      "Select a relation pair above or click a highlighted opposite block.",
+      "The table is limited to that one relation pair.",
+    );
+  }
+  text(title, `${state.selection.side === "source" ? "Original" : "Lifted"} block ${block.id}`);
+  for (const instruction of block.instructions) {
+    const row = document.createElement("div");
+    row.className = "instruction";
+    if (instruction.arm_inst_id !== null && instruction.arm_inst_id !== undefined) row.classList.add("mapped");
+    const id = instruction.arm_inst_id === null || instruction.arm_inst_id === undefined
+      ? instruction.address
+      : `ARM #${instruction.arm_inst_id}`;
+    row.innerHTML = `<span class="instruction-id"></span><span></span>`;
+    text(row.children[0], id);
+    text(row.children[1], instruction.text);
+    list.append(row);
+  }
+  const opposite = [...relatedBlocks(state.selection.side, block.id)];
+  text(related, opposite.length
+    ? `Directly related ${state.selection.side === "source" ? "lifted" : "source"} blocks: ${opposite.join(", ")}`
+    : "No direct block relation evidence.");
+}
+document.querySelector("#back").addEventListener("click", () => {
+  state.group = null;
+  state.selection = null;
+  state.relation = null;
+  state.unmatchedIds = null;
+  document.querySelector("#detail").hidden = true;
+  document.querySelector("#overview").hidden = false;
+});
+text(document.querySelector("#meta"), `${DATA.source.arch} -> ${DATA.target.arch}`);
+renderOverview();
+</script>
+</body>
+</html>
+"""
+    document = document.replace("__TITLE__", title).replace(
+        "__DATA__", data_json
+    )
+    Path(out_path).write_text(document, encoding="utf-8")
+    return out_path
 
 
 def dump_block_relations(report: dict) -> None:
@@ -1068,6 +2006,13 @@ def main():
         "--source-object",
         help="Original object file; render a combined source/target CFG",
     )
+    parser.add_argument(
+        "--viewer",
+        nargs="?",
+        const="",
+        metavar="HTML",
+        help="Write an interactive self-contained HTML correlation viewer",
+    )
 
     args = parser.parse_args()
 
@@ -1077,6 +2022,8 @@ def main():
         parser.error("--source-object requires --asm-map")
     if args.source_object and not args.function:
         parser.error("--source-object requires --function")
+    if args.viewer is not None and not args.source_object:
+        parser.error("--viewer requires --source-object")
 
     in_path = os.path.abspath(args.input)
     if not os.path.isfile(in_path):
@@ -1104,13 +2051,18 @@ def main():
         if not os.path.isfile(source_path):
             parser.error(f"source object not found: {source_path}")
         try:
-            combined_path, report = render_combined_cfg(
+            model = build_combined_cfg_model(
                 source_path,
                 in_path,
                 instruction_map,
                 debug_file,
                 args.function,
+            )
+            combined_path, report = render_combined_cfg_from_model(
+                model,
                 out_dir,
+                source_path,
+                in_path,
                 args.fmt,
             )
         except (ValueError, RuntimeError) as error:
@@ -1118,6 +2070,26 @@ def main():
         rendered = [combined_path]
         relation_reports = [report]
         print(f"Combined CFG: {combined_path}")
+        if args.viewer is not None:
+            viewer_path = (
+                os.path.abspath(args.viewer)
+                if args.viewer
+                else os.path.join(
+                    out_dir,
+                    f"{Path(source_path).name}_vs_"
+                    f"{Path(in_path).name}_{args.function}.html",
+                )
+            )
+            Path(viewer_path).parent.mkdir(parents=True, exist_ok=True)
+            viewer_path = render_interactive_viewer(
+                model,
+                str(Path(viewer_path).parent),
+                source_path,
+                in_path,
+                viewer_path,
+            )
+            rendered = [viewer_path]
+            print(f"Interactive viewer: {viewer_path}")
 
     elif ext == '.ll':
         if args.asm_map:

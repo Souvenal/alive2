@@ -1,8 +1,10 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from asm_diff import parse_instruction_map
+from dev import cmd_viewer
 from cfg import (
     align_source_blocks_with_instruction_map,
     build_address_block_relations,
@@ -13,6 +15,7 @@ from cfg import (
     build_relation_components,
     extract_target_addr,
     parse_objdump_output,
+    render_interactive_viewer,
 )
 
 
@@ -452,3 +455,106 @@ def test_combined_cfg_dot_frames_relation_components() -> None:
     assert "dir=both" in dot
     assert "ltail=cluster_source_group_0" in dot
     assert "lhead=cluster_target_group_0" in dot
+
+
+def test_render_interactive_viewer_embeds_cfg_data(tmp_path) -> None:
+    model = {
+        "function": "foo",
+        "source": {
+            "arch": "aarch64",
+            "blocks": [],
+            "edges": [],
+        },
+        "target": {
+            "arch": "x86-64",
+            "blocks": [],
+            "edges": [],
+        },
+        "report": {
+            "components": [],
+            "address_relations": [],
+            "unmatched_source_blocks": [],
+            "unmatched_target_blocks": [],
+            "unmatched_arm_inst_ids": [],
+        },
+    }
+
+    path = render_interactive_viewer(
+        model, str(tmp_path), "source.o", "lifted_x86_64"
+    )
+    document = Path(path).read_text(encoding="utf-8")
+
+    assert "const DATA =" in document
+    assert "Source group" in document
+    assert "Group-level CFG" in document
+    assert "Unmatched source" in document
+    assert "DWARF provenance evidence" in document
+    assert "Relation pairs for" in document
+    assert "ARM IDs" in document
+    assert "Select a block to inspect instructions" in document
+
+
+def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "sample.c"
+    source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    output = tmp_path / "output"
+    output.mkdir()
+    bc = output / "sample.bc"
+    source_object = output / "sample.o"
+    lifted_ll = output / "sample.lifted.ll"
+    asm_map = output / "sample.asm-map.json"
+    lifted_binary = output / "sample.lifted_x86_64"
+    viewer = output / "sample.cfg-viewer.html"
+    calls = {}
+
+    monkeypatch.setattr("dev._require_arm_lifter", lambda: None)
+    monkeypatch.setattr("dev._clean_case", lambda name, outdir: None)
+    monkeypatch.setattr(
+        "dev.compile_bc_and_o",
+        lambda src, outdir, extra_cflags: (bc, source_object),
+    )
+    monkeypatch.setattr(
+        "dev._lift",
+        lambda *args, **kwargs: calls.setdefault("lift", (args, kwargs)) and 0,
+    )
+    monkeypatch.setattr("dev.recompile_x86_64", lambda ll, outdir: lifted_binary)
+    monkeypatch.setattr(
+        "dev.parse_instruction_map",
+        lambda path: ("arm_asm.s", {"main": {}}),
+    )
+    monkeypatch.setattr(
+        "dev.build_combined_cfg_model",
+        lambda *args: calls.setdefault("model", args) or {"function": "main"},
+    )
+
+    def render(model, outdir, src_obj, target, output_path):
+        calls["render"] = (model, outdir, src_obj, target, output_path)
+        Path(output_path).write_text("<html></html>", encoding="utf-8")
+        return output_path
+
+    monkeypatch.setattr("dev.render_interactive_viewer", render)
+    monkeypatch.setattr(
+        "dev.webbrowser.open",
+        lambda uri: calls.setdefault("browser_uri", uri) or True,
+    )
+
+    cmd_viewer(
+        source,
+        output,
+        "main",
+        cleanup=True,
+        extra_cflags=["-DMODE=1"],
+    )
+
+    lift_args, lift_kwargs = calls["lift"]
+    assert lift_args[:4] == (source_object, bc, lifted_ll, output / "sample.lift.log")
+    assert lift_kwargs == {"cleanup": True, "asm_map": asm_map}
+    assert calls["model"] == (
+        str(source_object),
+        str(lifted_binary),
+        {"main": {}},
+        "arm_asm.s",
+        "main",
+    )
+    assert calls["render"][-1] == str(viewer)
+    assert calls["browser_uri"] == viewer.resolve().as_uri()

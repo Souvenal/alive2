@@ -6,6 +6,7 @@ Usage:
     uv run python tests/lift/dev.py full <case>              full pipeline + asm comparison
     uv run python tests/lift/dev.py full-without-optimize <case>
                                                              full pipeline (no cleanup passes) + asm comparison
+    uv run python tests/lift/dev.py viewer <source.c>        open interactive CFG correlation viewer
     uv run python tests/lift/dev.py diffasm <case>           diff source vs lifted .s
     uv run python tests/lift/dev.py run <case> <kind>        run existing binary
       kind: arm64 | lifted_x64
@@ -16,10 +17,13 @@ import argparse
 import shutil
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from asm_diff import parse_instruction_map
+from cfg import build_combined_cfg_model, render_interactive_viewer
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
@@ -62,10 +66,26 @@ def _check_case(name: str) -> Path:
     return src
 
 
+def _check_source(src: Path) -> Path:
+    src = src.resolve()
+    if not src.is_file():
+        sys.exit(f"source file not found: {src}")
+    if src.suffix != ".c":
+        sys.exit(f"source file must end in .c: {src}")
+    return src
+
+
 def _extra_cflags(name: str) -> list[str]:
     """Return per-case extra CFLAGS from CASE_MARKS, or [] if none."""
     _, _, extra = CASE_MARKS.get(name, ("must_pass", None, []))
     return extra
+
+
+def _extra_cflags_for_source(src: Path) -> list[str]:
+    case_src = CASES_DIR / src.name
+    if case_src.exists() and case_src.resolve() == src:
+        return _extra_cflags(src.stem)
+    return []
 
 
 def _outdir(base: Path | None) -> Path:
@@ -239,6 +259,70 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
     print(f"lifted asm → {lifted_s}")
 
 
+def cmd_viewer(
+    source: Path,
+    outdir: Path,
+    function: str,
+    cleanup: bool,
+    extra_cflags: list[str],
+) -> None:
+    """Build one source file and open its interactive CFG correlation viewer."""
+    _require_arm_lifter()
+    src = _check_source(source)
+    name = src.stem
+    _clean_case(name, outdir)
+
+    cflags = _extra_cflags_for_source(src) + extra_cflags
+    bc, source_object = compile_bc_and_o(src, outdir, extra_cflags=cflags)
+    lifted_ll = outdir / f"{name}.lifted.ll"
+    log = outdir / f"{name}.lift.log"
+    asm_map = outdir / f"{name}.asm-map.json"
+    viewer = outdir / f"{name}.cfg-viewer.html"
+
+    rc = _lift(
+        source_object,
+        bc,
+        lifted_ll,
+        log,
+        cleanup=cleanup,
+        asm_map=asm_map,
+    )
+    if rc != 0:
+        print(f"arm-lifter failed (exit {rc}), see {log}", file=sys.stderr)
+        sys.exit(rc)
+
+    lifted_binary = recompile_x86_64(lifted_ll, outdir)
+    debug_file, instruction_map = parse_instruction_map(str(asm_map))
+    try:
+        model = build_combined_cfg_model(
+            str(source_object),
+            str(lifted_binary),
+            instruction_map,
+            debug_file,
+            function,
+        )
+    except (RuntimeError, ValueError) as error:
+        sys.exit(f"Cannot build correlation viewer: {error}")
+
+    viewer_path = render_interactive_viewer(
+        model,
+        str(outdir),
+        str(source_object),
+        str(lifted_binary),
+        str(viewer),
+    )
+    viewer_uri = Path(viewer_path).resolve().as_uri()
+    if not webbrowser.open(viewer_uri):
+        print(f"Could not open a browser automatically; open {viewer_path}")
+        return
+
+    print(f"source    → {src}")
+    print(f"lift      → {lifted_ll}")
+    print(f"asm map   → {asm_map}")
+    print(f"x86_64    → {lifted_binary}")
+    print(f"viewer    → {viewer_path}")
+
+
 def cmd_run(name: str, kind: str, outdir: Path) -> None:
     _check_case(name)
 
@@ -301,6 +385,24 @@ def main() -> None:
                        help="Lift without cleanup passes + recompile + asm comparison")
     p.add_argument("case")
 
+    p = sub.add_parser(
+        "viewer",
+        help="Build a .c file and open its interactive CFG correlation viewer",
+    )
+    p.add_argument("source", type=Path)
+    p.add_argument(
+        "-f", "--function", default="main",
+        help="function to visualize (default: main)",
+    )
+    p.add_argument(
+        "--without-cleanup", action="store_true",
+        help="pass --run-cleanup=false to arm-lifter",
+    )
+    p.add_argument(
+        "--cflag", action="append", default=[],
+        help="additional C compiler flag; may be repeated",
+    )
+
     p = sub.add_parser("diffasm", help="Diff source vs lifted ARM assembly")
     p.add_argument("case")
 
@@ -319,6 +421,14 @@ def main() -> None:
         cmd_full(args.case, outdir)
     elif args.cmd == "full-without-optimize":
         cmd_full_no_cleanup(args.case, outdir)
+    elif args.cmd == "viewer":
+        cmd_viewer(
+            args.source,
+            outdir,
+            args.function,
+            cleanup=not args.without_cleanup,
+            extra_cflags=args.cflag,
+        )
     elif args.cmd == "run":
         cmd_run(args.case, args.kind, outdir)
     elif args.cmd == "diffasm":

@@ -113,6 +113,19 @@ uv run python dev.py full minirepro
 uv run python asm_diff.py output/minirepro.asm-map.json output/minirepro.lifted_x86_64 --fn main
 ```
 
+For a one-command interactive correlation viewer from any C file:
+
+```bash
+uv run python dev.py viewer cases/minirepro.c
+```
+
+This compiles the source to ARM64 `.o` and `.bc`, lifts it with an instruction
+map, recompiles the lifted IR to x86_64, writes
+`output/minirepro.cfg-viewer.html`, and opens it in the default browser. It
+visualizes `main` by default; choose another function with `-f <function>`.
+Use `--without-cleanup` to inspect the raw lifted IR, and repeat
+`--cflag=<flag>` for source-specific compiler flags.
+
 `dev.py full` also produces `<case>.nodbg.ll` — source IR compiled with `-g0`
 (no debug metadata). Compare its instruction count against the lifted IR:
 
@@ -200,6 +213,30 @@ connected component of the many-to-many block relation gets matching colored
 frames on both sides and a bidirectional arrow between the frames. Original
 object instructions are aligned to non-synthetic `arm_inst_id` records in
 instruction order; a count mismatch is reported as an error.
+
+Generate a self-contained interactive HTML viewer:
+
+```bash
+uv run python cfg.py output/minirepro.lifted_x86_64 \
+  --source-object output/minirepro.o \
+  --asm-map output/minirepro.asm-map.json \
+  -f main --viewer
+```
+
+The initial view shows only relation groups. Select a group to inspect its
+source and lifted blocks, then select a block to inspect its instructions.
+Use `--open` with `--viewer` to open the HTML viewer directly.
+
+Selecting a block shows its direct block-relation pairs. Select one pair to
+show its `ARM ID | Original | Lifted` DWARF provenance evidence. Either side
+may contain multiple instructions for one ARM ID; this records correlation
+without implying a one-to-one semantic mapping.
+
+The overview is also a group-level CFG: blue edges aggregate original CFG
+edges, orange edges aggregate lifted CFG edges, and dashed `<->` edges carry
+the cross-side instruction evidence. Gray nodes represent unmatched source
+blocks, unmatched target blocks, or source instructions without direct target
+block evidence.
 
 ## Adding a new test case
 
