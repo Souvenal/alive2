@@ -148,6 +148,8 @@ output/
 ├── minirepro.lifted.ll        # lifted IR (inspect this)
 ├── minirepro.lift.log         # arm-lifter stdout/stderr (instruction-level debug)
 ├── minirepro.asm-map.json     # structured ARM instruction correlation records
+├── minirepro.lifted.arm64.o   # lifted IR recompiled to AArch64 object
+├── minirepro.lifted_arm64     # linked AArch64 binary recompiled from lifted IR
 ├── minirepro.lifted_x86_64    # x86_64 binary (re-ran from lifted IR)
 └── minirepro_arm64            # ARM64 reference binary (compiled from original .c)
 ```
@@ -178,28 +180,89 @@ be optimized away, and several target instructions may share one ARM record.
 
 ### Basic-Block Correlation
 
-`cfg.py --asm-map` lifts the instruction-level DWARF relation into an
-unweighted many-to-many relation between source MC blocks and target machine
-blocks:
+Build the LLVM MC CFG extractor once:
 
 ```bash
-uv run python cfg.py output/minirepro.lifted_arm64 \
-  --asm-map output/minirepro.asm-map.json \
-  -f main --text
+cmake --build ../../build --config Release --target machine-cfg-dump
 ```
 
-Write the relation evidence as JSON:
+Combined source/target correlation invokes `machine-cfg-dump` once per binary.
+It uses LLVM MC instruction metadata and branch evaluation to recover
+instructions, blocks, typed edges, reachability, and unresolved exits.
+`llvm-objdump --line-numbers` is used only to attach the synthetic DWARF
+provenance emitted by arm-lifter.
+
+Print conservative one-to-one matches between independently recovered source
+and target Machine CFGs:
 
 ```bash
 uv run python cfg.py output/minirepro.lifted_x86_64 \
+  --source-object output/minirepro.o \
   --asm-map output/minirepro.asm-map.json \
-  -f main --relations-json output/minirepro.block-relations.json
+  -f main --block-match
 ```
 
-Each relation records the deduplicated `arm_inst_ids` that connect a source
-`mc_block` to a target address block. Empty assembly records, `SEH_Nop`, and
-the synthetic entry branch are excluded. No score or one-to-one matching is
-imposed.
+Write the Machine CFG edge facts, low-level provenance relations, matching
+decisions, and optional MCA results as JSON:
+
+```bash
+uv run python cfg.py output/minirepro.lifted_x86_64 \
+  --source-object output/minirepro.o \
+  --asm-map output/minirepro.asm-map.json \
+  -f main --block-match \
+  --relations-json output/minirepro.block-comparison.json
+```
+
+The score combines source instruction coverage, target instruction purity,
+and ARM instruction order. A pair is accepted only when it is an
+unambiguous mutual-best candidate above the configured thresholds. Branch
+and return instructions carry weak evidence so block-boundary debug records
+cannot create matches by themselves. Rejected blocks remain explicitly
+unmatched with their best candidate and rejection reason.
+
+For matching source and target ISAs, run `llvm-mca` on each accepted pair:
+
+```bash
+uv run python dev.py full minirepro
+
+uv run python cfg.py output/minirepro.lifted.arm64.o \
+  --source-object output/minirepro.o \
+  --asm-map output/minirepro.asm-map.json \
+  -f main --block-match --mca \
+  --mcpu=generic --mattr=""
+```
+
+The shortest complete workflow is also available as one script:
+
+```bash
+./run-block-comparison.sh minirepro main
+```
+
+It runs `dev.py full`, performs same-ISA block matching and body/full MCA
+analysis, and writes
+`output/minirepro.main.block-comparison.json`. Optional environment overrides:
+
+```bash
+MCPU=cortex-x2 \
+MATTR="+neon" \
+MCA_ITERATIONS=500 \
+OUTPUT_DIR=/tmp/lift-output \
+./run-block-comparison.sh minirepro main
+```
+
+Each accepted match produces two named MCA Analysis Regions:
+
+- `body`: excludes the machine control-flow terminator and is the primary
+  code-generation cost comparison.
+- `full`: includes the terminator and reports the complete block-local cost.
+
+All regions for one side are analyzed in one `llvm-mca` invocation. The report
+records instruction count, uOps per iteration, block reciprocal throughput,
+cycles per iteration, aggregate resource pressure, absolute deltas, ratios,
+`mcpu`, `mattr`, iterations, and the no-alias policy. Direct performance deltas
+are not reported across different ISAs because their scheduling models are not
+comparable. A region containing a call measures only the call instruction, not
+the callee.
 
 Render the original and lifted CFGs in one image:
 

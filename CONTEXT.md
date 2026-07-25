@@ -48,6 +48,22 @@ The legacy ARM/RISC-V → LLVM-IR lifting engine inherited from upstream alive2.
 **Validation pipeline** (`scripts/lift_compile_commands.py`):
 External scaffolding, *not part of arm-lifter itself*. Takes a `compile_commands.json` from another project, runs arm-lifter on every `.o`, re-codegens each `.ll` to x86_64, links, runs the resulting binary in a VM, and checks observable behavior against the original ARM64 build. Currently **dormant** — kept for future use after arm-lifter matures (see Future Topics).
 
+**Machine CFG**:
+The intraprocedural control-flow graph recovered from one machine-code function. Its blocks, instructions, and edges are facts about one binary and do not contain cross-binary matches or performance estimates.
+_Avoid_: Combined CFG, correlated CFG
+
+**Block Correlation**:
+Evidence and a decision relating one original Machine CFG block to one recompiled Machine CFG block through shared `arm_inst_id` provenance. A correlation is not a control-flow edge.
+_Avoid_: CFG edge, block group
+
+**MCA Analysis Region**:
+An instruction sequence derived from a correlated machine block for isolated `llvm-mca` analysis. A region may contain the block body only or the complete block including its terminator.
+_Avoid_: Basic block when referring to the performance-analysis input
+
+**Cost Comparison**:
+A comparison of two MCA Analysis Region results produced with the same ISA, CPU model, feature set, and analysis policy. It is a static scheduling-model comparison, not an execution-time measurement.
+_Avoid_: Benchmark result, runtime speedup
+
 ## Contracts
 
 arm-lifter has three tiers of contract. The first is strict (broken = bug), the second is measured (tracked as a metric), the third is aspirational (future goal).

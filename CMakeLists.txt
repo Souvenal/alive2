@@ -230,6 +230,7 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "lifter_util/codegen_runtime_abi.cpp"
     "lifter_util/instruction_map.cpp"
     "lifter_util/lifter_cleanup.cpp"
+    "lifter_util/machine_cfg.cpp"
     "lifter_util/obj2asm.cpp"
     "lifter_util/object_lift_context.cpp"
   )
@@ -249,6 +250,11 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "tools/arm-lifter.cpp"
   )
   target_compile_options(arm-lifter PRIVATE -fexceptions)
+
+  add_llvm_executable(machine-cfg-dump
+    "tools/machine-cfg-dump.cpp"
+  )
+  target_compile_options(machine-cfg-dump PRIVATE -fexceptions)
 
   add_llvm_executable(quick-fuzz
     "tools/quick-fuzz.cpp"
@@ -303,15 +309,16 @@ install(TARGETS alive alive-jobserver)
 #add_library(alive2 SHARED ${IR_SRCS} ${SMT_SRCS} ${TOOLS_SRCS} ${UTIL_SRCS} ${LLVM_UTIL_SRCS})
 
 if (BUILD_LLVM_UTILS OR BUILD_TV)
-  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils AllTargetsCodeGens AllTargetsDescs AllTargetsInfos DebugInfoDWARF Linker
+  llvm_map_components_to_libnames(llvm_libs CodeGen TargetParser support core irreader bitreader bitwriter analysis passes transformutils ipo asmparser asmprinter target mc mcparser mcdisassembler object aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils AllTargetsCodeGens AllTargetsDescs AllTargetsDisassemblers AllTargetsInfos DebugInfoDWARF Linker
     )
 
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
   target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(arm-lifter PRIVATE ${ALIVE_LIBS_LLVM} lifter_util ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
+  target_link_libraries(machine-cfg-dump PRIVATE lifter_util ${llvm_libs})
   target_link_libraries(quick-fuzz PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
-  install(TARGETS alive-tv quick-fuzz alive-exec)
+  install(TARGETS alive-tv machine-cfg-dump quick-fuzz alive-exec)
 endif()
 
 target_link_libraries(alive PRIVATE ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES})

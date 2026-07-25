@@ -1,0 +1,3 @@
+# Separate machine CFG facts from correlation and performance analysis
+
+Machine-code comparison uses four explicit layers: LLVM MC recovers an immutable Machine CFG for each binary, provenance produces one-to-one Block Correlations without modifying either graph, accepted correlations derive body and full MCA Analysis Regions, and only comparable region results produce Cost Comparisons. This avoids treating cross-binary matches as CFG edges or assuming that an entire basic block is always the right `llvm-mca` input; unresolved control flow and unmatched blocks remain explicit instead of being merged into multi-block groups.

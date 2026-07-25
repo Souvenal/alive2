@@ -3,9 +3,10 @@
 
 Supports LLVM IR (.ll), assembly (.s), and object files (.o).
 
-For .s/.o: assembles with llvm-mc (for .s), then disassembles with
-llvm-objdump to get structured instruction listing.  Basic blocks are
-determined from branch targets and branch instructions.
+For standalone .s/.o rendering, assembles with llvm-mc (for .s) and uses
+llvm-objdump. Combined source/target correlation uses machine-cfg-dump and
+LLVM MC for basic-block boundaries and CFG edges; llvm-objdump line tables are
+used only to recover synthetic arm_inst_id provenance.
 
 Usage:
     cd tests/lift && uv run python cfg.py output/Maze.lifted.ll
@@ -28,6 +29,8 @@ from pathlib import Path
 
 from asm_diff import parse_instruction_map
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 def require_tool(name: str) -> str:
     path = shutil.which(name)
@@ -35,6 +38,26 @@ def require_tool(name: str) -> str:
         print(f"Error: '{name}' not found in PATH", file=sys.stderr)
         sys.exit(1)
     return path
+
+
+def require_machine_cfg_dump() -> str:
+    configured = os.environ.get("MACHINE_CFG_DUMP")
+    candidates = [
+        Path(configured) if configured else None,
+        PROJECT_ROOT / "build" / "Release" / "machine-cfg-dump",
+        PROJECT_ROOT / "build" / "Debug" / "machine-cfg-dump",
+        PROJECT_ROOT / "build" / "machine-cfg-dump",
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return str(candidate)
+    path = shutil.which("machine-cfg-dump")
+    if path:
+        return path
+    raise RuntimeError(
+        "machine-cfg-dump not found; build it with "
+        "'cmake --build build --target machine-cfg-dump'"
+    )
 
 
 # ── LLVM IR (.ll) pipeline ──────────────────────────────────────────
@@ -115,6 +138,11 @@ ARCH_PROFILES = {
         'call': {'call', 'callq'},
         'ret': {'ret', 'retq'},
     },
+}
+
+MCA_TRIPLES = {
+    "aarch64": "aarch64-linux-gnu",
+    "x86-64": "x86_64-linux-gnu",
 }
 
 # Regexes against llvm-objdump -d output.
@@ -214,6 +242,137 @@ def objdump(path: str, debug_file: str | None = None) -> tuple[str, list[dict]]:
         sys.exit(1)
 
     return parse_objdump_output(r.stdout, debug_file)
+
+
+def normalize_arch(arch: str) -> str:
+    if arch in {"x86_64", "amd64"}:
+        return "x86-64"
+    if arch in {"arm64"}:
+        return "aarch64"
+    return arch
+
+
+def load_machine_cfg(
+    path: str,
+    debug_file: str | None = None,
+    function_filter: str | None = None,
+) -> tuple[str, dict[str, dict]]:
+    """Load LLVM MC CFGs and optionally attach synthetic DWARF provenance."""
+    command = [require_machine_cfg_dump(), path]
+    if function_filter:
+        command.append(f"--function={function_filter}")
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "machine-cfg-dump failed: "
+            + (result.stderr.strip() or f"exit {result.returncode}")
+        )
+    try:
+        bundle = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"invalid machine-cfg-dump JSON: {error}"
+        ) from error
+    if not isinstance(bundle, dict) or bundle.get("version") != 1:
+        raise RuntimeError("unsupported machine CFG schema")
+
+    binary = bundle.get("binary")
+    functions = bundle.get("functions")
+    if not isinstance(binary, dict) or not isinstance(functions, list):
+        raise RuntimeError("malformed machine CFG")
+    arch = normalize_arch(str(binary.get("architecture", "")))
+
+    debug_lines: dict[tuple[str, int], int | None] = {}
+    if debug_file:
+        _, debug_instructions = objdump(path, debug_file)
+        debug_lines = {
+            (instruction["func"], instruction["addr"]):
+                instruction.get("dwarf_line")
+            for instruction in debug_instructions
+        }
+
+    function_graphs = {}
+    for function in functions:
+        if not isinstance(function, dict):
+            raise RuntimeError("malformed machine CFG function")
+        name = function.get("name")
+        instructions = function.get("instructions")
+        block_records = function.get("blocks")
+        edge_records = function.get("edges")
+        if (not isinstance(name, str)
+                or not isinstance(instructions, list)
+                or not isinstance(block_records, list)
+                or not isinstance(edge_records, list)):
+            raise RuntimeError("malformed machine CFG function")
+        if name in function_graphs:
+            raise RuntimeError(
+                f"duplicate function '{name}' in machine CFG"
+            )
+
+        decoded_instructions = []
+        for instruction in instructions:
+            address = instruction["address"]
+            assembly = instruction["assembly"]
+            decoded_instructions.append({
+                "instruction_id": instruction.get("id"),
+                "func": name,
+                "addr": address,
+                "raw": f"{address:x}:\t{assembly}",
+                "mnemonic": instruction["mnemonic"],
+                "operands": instruction["operands"],
+                "dwarf_line": debug_lines.get((name, address)),
+                "opcode": instruction["opcode"],
+                "opcode_id": instruction["opcode_id"],
+                "size": instruction["size"],
+                "bytes": instruction["bytes"],
+                "flow_kind": instruction["flow_kind"],
+                "is_terminator": instruction["is_terminator"],
+                "is_call": instruction["is_call"],
+                "direct_target": instruction["direct_target"],
+                "relocation_symbol": instruction["relocation_symbol"],
+            })
+
+        blocks = []
+        for block in block_records:
+            block_instructions = [
+                decoded_instructions[index]
+                for index in block["instruction_indices"]
+            ]
+            blocks.append((block["id"], block_instructions))
+
+        label_by_kind = {
+            "branch_taken": "T",
+            "branch_not_taken": "F",
+            "jump": "J",
+            "fallthrough": "",
+        }
+        edges = [
+            (
+                edge["source"],
+                edge["target"],
+                label_by_kind[edge["kind"]],
+            )
+            for edge in edge_records
+            if edge["target"] is not None
+            and edge["kind"] in label_by_kind
+        ]
+        function_graphs[name] = {
+            "blocks": blocks,
+            "edges": edges,
+            "cfg_edges": edge_records,
+            "block_records": block_records,
+            "instructions": decoded_instructions,
+            "section": function.get("section"),
+            "address": function.get("address"),
+            "size": function.get("size"),
+            "errors": function.get("errors", []),
+        }
+
+    return arch, function_graphs
 
 
 def extract_target_addr(insn: dict, arch: str) -> int | None:
@@ -569,6 +728,594 @@ def build_address_block_relations(
     ]
 
 
+def _instruction_match_weight(instruction: dict, arch: str) -> float:
+    """Give block terminators weak weight as cross-block correlation evidence."""
+    if instruction.get("is_terminator") is True:
+        return 0.25
+    if "is_terminator" in instruction:
+        return 1.0
+    profile = ARCH_PROFILES.get(arch, ARCH_PROFILES["x86-64"])
+    mnemonic = instruction.get("mnemonic", "")
+    if (mnemonic in profile["cond"]
+            or mnemonic in profile["uncond"]
+            or mnemonic in profile["indirect"]
+            or mnemonic in profile["ret"]):
+        return 0.25
+    return 1.0
+
+
+def _collapse_consecutive(values: list[int]) -> list[int]:
+    result = []
+    for value in values:
+        if not result or result[-1] != value:
+            result.append(value)
+    return result
+
+
+def _lcs_length(left: list[int], right: list[int]) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_value in left:
+        current = [0]
+        for index, right_value in enumerate(right, start=1):
+            if left_value == right_value:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def build_block_similarity_records(
+    source_blocks: list[tuple[str, list[dict]]],
+    target_blocks: list[tuple[str, list[dict]]],
+    source_arch: str,
+) -> list[dict]:
+    """Score source/target address blocks using instruction-map provenance."""
+    arm_id_weights: dict[int, float] = {}
+    source_sequences: dict[str, list[int]] = {}
+    for block_name, instructions in source_blocks:
+        sequence = []
+        for instruction in instructions:
+            arm_inst_id = instruction.get("arm_inst_id")
+            if not isinstance(arm_inst_id, int):
+                continue
+            if arm_inst_id not in sequence:
+                sequence.append(arm_inst_id)
+            arm_id_weights[arm_inst_id] = _instruction_match_weight(
+                instruction, source_arch
+            )
+        source_sequences[block_name] = sequence
+
+    target_sequences = {
+        block_name: _collapse_consecutive([
+            arm_inst_id
+            for instruction in instructions
+            if isinstance(
+                arm_inst_id := instruction.get("arm_inst_id"), int
+            )
+        ])
+        for block_name, instructions in target_blocks
+    }
+    target_instruction_ids = {
+        block_name: [
+            arm_inst_id
+            for instruction in instructions
+            if isinstance(
+                arm_inst_id := instruction.get("arm_inst_id"), int
+            )
+        ]
+        for block_name, instructions in target_blocks
+    }
+
+    records = []
+    for source_block, source_sequence in source_sequences.items():
+        source_ids = set(source_sequence)
+        source_weight = sum(
+            arm_id_weights[arm_inst_id] for arm_inst_id in source_ids
+        )
+        if source_weight == 0:
+            continue
+
+        for target_block, target_sequence in target_sequences.items():
+            target_ids = set(target_sequence)
+            matched_ids = source_ids & target_ids
+            if not matched_ids:
+                continue
+
+            matched_weight = sum(
+                arm_id_weights[arm_inst_id] for arm_inst_id in matched_ids
+            )
+            source_coverage = matched_weight / source_weight
+
+            target_weights = [
+                arm_id_weights.get(arm_inst_id, 1.0)
+                for arm_inst_id in target_instruction_ids[target_block]
+            ]
+            matching_target_weight = sum(
+                weight
+                for arm_inst_id, weight in zip(
+                    target_instruction_ids[target_block],
+                    target_weights,
+                    strict=True,
+                )
+                if arm_inst_id in source_ids
+            )
+            total_target_weight = sum(target_weights)
+            target_purity = (
+                matching_target_weight / total_target_weight
+                if total_target_weight
+                else 0.0
+            )
+
+            if source_coverage + target_purity:
+                instruction_score = (
+                    2 * source_coverage * target_purity
+                    / (source_coverage + target_purity)
+                )
+            else:
+                instruction_score = 0.0
+
+            lcs_length = _lcs_length(source_sequence, target_sequence)
+            order_similarity = lcs_length / max(
+                len(source_sequence), len(target_sequence)
+            )
+            score = 0.8 * instruction_score + 0.2 * order_similarity
+
+            records.append({
+                "source_block": source_block,
+                "target_block": target_block,
+                "score": score,
+                "source_coverage": source_coverage,
+                "target_purity": target_purity,
+                "order_similarity": order_similarity,
+                "matched_weight": matched_weight,
+                "arm_inst_ids": sorted(matched_ids),
+            })
+
+    return sorted(
+        records,
+        key=lambda record: (
+            record["source_block"],
+            -record["score"],
+            record["target_block"],
+        ),
+    )
+
+
+def select_one_to_one_block_matches(
+    similarity_records: list[dict],
+    source_block_names: list[str],
+    target_block_names: list[str],
+    *,
+    min_score: float = 0.75,
+    min_margin: float = 0.15,
+    min_matched_weight: float = 1.0,
+) -> dict:
+    """Select conservative one-to-one matches using mutual-best candidates."""
+    by_source: dict[str, list[dict]] = {}
+    by_target: dict[str, list[dict]] = {}
+    for record in similarity_records:
+        by_source.setdefault(record["source_block"], []).append(record)
+        by_target.setdefault(record["target_block"], []).append(record)
+
+    def ranked(records: list[dict]) -> list[dict]:
+        return sorted(
+            records,
+            key=lambda record: (
+                -record["score"],
+                record["source_block"],
+                record["target_block"],
+            ),
+        )
+
+    source_rankings = {
+        block_name: ranked(records)
+        for block_name, records in by_source.items()
+    }
+    target_rankings = {
+        block_name: ranked(records)
+        for block_name, records in by_target.items()
+    }
+
+    def has_margin(records: list[dict]) -> bool:
+        if len(records) < 2:
+            return True
+        return records[0]["score"] - records[1]["score"] >= min_margin
+
+    matches = []
+    for source_block in sorted(source_rankings):
+        source_candidates = source_rankings[source_block]
+        candidate = source_candidates[0]
+        if (candidate["score"] < min_score
+                or candidate["matched_weight"] < min_matched_weight
+                or not has_margin(source_candidates)):
+            continue
+
+        target_candidates = target_rankings[candidate["target_block"]]
+        if (target_candidates[0] is not candidate
+                or not has_margin(target_candidates)):
+            continue
+        matches.append(candidate)
+
+    matched_sources = {
+        match["source_block"] for match in matches
+    }
+    matched_targets = {
+        match["target_block"] for match in matches
+    }
+    ambiguous_sources = sorted(
+        source_block
+        for source_block, records in source_rankings.items()
+        if source_block not in matched_sources
+        and records[0]["score"] >= min_score
+        and records[0]["matched_weight"] >= min_matched_weight
+    )
+    ambiguous_targets = sorted(
+        target_block
+        for target_block, records in target_rankings.items()
+        if target_block not in matched_targets
+        and records[0]["score"] >= min_score
+        and records[0]["matched_weight"] >= min_matched_weight
+    )
+
+    return {
+        "matches": matches,
+        "unmatched_source_blocks": sorted(
+            set(source_block_names) - matched_sources
+        ),
+        "unmatched_target_blocks": sorted(
+            set(target_block_names) - matched_targets
+        ),
+        "ambiguous_source_blocks": ambiguous_sources,
+        "ambiguous_target_blocks": ambiguous_targets,
+        "thresholds": {
+            "min_score": min_score,
+            "min_margin": min_margin,
+            "min_matched_weight": min_matched_weight,
+        },
+    }
+
+
+def _mca_instruction_text(instruction: dict) -> str:
+    mnemonic = instruction.get("mnemonic", "")
+    operands = re.sub(
+        r"\s*<[^>]+>",
+        "",
+        instruction.get("operands", ""),
+    ).strip()
+    return " ".join(part for part in (mnemonic, operands) if part)
+
+
+def run_llvm_mca_for_block(
+    instructions: list[dict],
+    arch: str,
+    mcpu: str,
+    iterations: int,
+    mattr: str = "",
+) -> dict:
+    """Compatibility wrapper for one full-block llvm-mca region."""
+    return run_llvm_mca_regions(
+        {"block": instructions},
+        arch,
+        mcpu,
+        iterations,
+        mattr,
+    )["block"]
+
+
+def _mca_error(message: str) -> dict:
+    return {
+        "status": "error",
+        "error": message,
+    }
+
+
+def _parse_mca_region_result(
+    region: dict,
+    arch: str,
+    triple: str,
+    mcpu: str,
+    iterations: int,
+    warnings: list[str],
+    resources: list[str],
+) -> dict:
+    try:
+        summary = region["SummaryView"]
+    except (KeyError, TypeError):
+        return _mca_error("llvm-mca region has no SummaryView")
+
+    instruction_count = len(region.get("Instructions", []))
+    resource_pressure = {}
+    for item in (
+        region.get("ResourcePressureView", {})
+        .get("ResourcePressureInfo", [])
+    ):
+        if item.get("InstructionIndex") != instruction_count:
+            continue
+        resource_index = item.get("ResourceIndex")
+        if not isinstance(resource_index, int):
+            continue
+        resource_name = (
+            resources[resource_index]
+            if 0 <= resource_index < len(resources)
+            else str(resource_index)
+        )
+        resource_name = "".join(
+            str(ord(character))
+            if ord(character) < 32
+            else character
+            for character in resource_name
+        )
+        resource_pressure[resource_name] = item.get("ResourceUsage", 0.0)
+
+    actual_iterations = summary.get("Iterations", iterations) or iterations
+    return {
+        "status": "ok",
+        "arch": arch,
+        "triple": triple,
+        "mcpu": mcpu,
+        "iterations": actual_iterations,
+        "instruction_count": instruction_count,
+        "total_cycles": summary.get("TotalCycles", 0),
+        "cycles_per_iteration": (
+            summary.get("TotalCycles", 0) / actual_iterations
+        ),
+        "total_uops": summary.get("TotaluOps", 0),
+        "uops_per_iteration": (
+            summary.get("TotaluOps", 0) / actual_iterations
+        ),
+        "ipc": summary.get("IPC", 0.0),
+        "uops_per_cycle": summary.get("uOpsPerCycle", 0.0),
+        "block_rthroughput": summary.get("BlockRThroughput", 0.0),
+        "dispatch_width": summary.get("DispatchWidth", 0),
+        "resource_pressure": resource_pressure,
+        "warnings": warnings,
+    }
+
+
+def run_llvm_mca_regions(
+    regions: dict[str, list[dict]],
+    arch: str,
+    mcpu: str,
+    iterations: int,
+    mattr: str = "",
+) -> dict[str, dict]:
+    """Analyze named instruction regions in one llvm-mca invocation."""
+    triple = MCA_TRIPLES.get(arch)
+    if triple is None:
+        return {
+            name: {
+                "status": "unsupported_arch",
+                "error": f"no llvm-mca triple configured for '{arch}'",
+            }
+            for name in regions
+        }
+
+    results = {}
+    assembly_lines = [".text"]
+    submitted_regions = []
+    for name, instructions in regions.items():
+        instruction_lines = [
+            _mca_instruction_text(instruction)
+            for instruction in instructions
+            if instruction.get("mnemonic")
+        ]
+        if not instruction_lines:
+            results[name] = _mca_error(
+                "region has no analyzable instructions"
+            )
+            continue
+        submitted_regions.append(name)
+        assembly_lines.append(f"# LLVM-MCA-BEGIN {name}")
+        assembly_lines.extend(instruction_lines)
+        assembly_lines.append(f"# LLVM-MCA-END {name}")
+
+    if not submitted_regions:
+        return results
+
+    llvm_mca = require_tool("llvm-mca")
+    command = [
+        llvm_mca,
+        f"-mtriple={triple}",
+        f"-mcpu={mcpu}",
+        f"--iterations={iterations}",
+        "--json",
+        "-",
+    ]
+    if mattr:
+        command.insert(-2, f"-mattr={mattr}")
+    assembly = "\n".join(assembly_lines) + "\n"
+    result = subprocess.run(
+        command,
+        input=assembly,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        error = result.stderr.strip() or "llvm-mca failed"
+        results.update({
+            name: _mca_error(error)
+            for name in submitted_regions
+        })
+        return results
+
+    try:
+        data = json.loads(result.stdout)
+        output_regions = data["CodeRegions"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        message = f"invalid llvm-mca JSON output: {error}"
+        results.update({
+            name: _mca_error(message)
+            for name in submitted_regions
+        })
+        return results
+
+    warnings = [
+        line for line in result.stderr.splitlines() if line.strip()
+    ]
+    resources = data.get("TargetInfo", {}).get("Resources", [])
+    by_name = {
+        region.get("Name"): region
+        for region in output_regions
+        if isinstance(region, dict)
+    }
+    for name in submitted_regions:
+        region = by_name.get(name)
+        if region is None:
+            results[name] = _mca_error(
+                f"llvm-mca omitted region '{name}'"
+            )
+            continue
+        results[name] = _parse_mca_region_result(
+            region,
+            arch,
+            triple,
+            mcpu,
+            iterations,
+            warnings,
+            resources,
+        )
+    return results
+
+
+def _mca_region_instructions(
+    instructions: list[dict],
+    policy: str,
+) -> list[dict]:
+    if policy == "full" or not instructions:
+        return instructions
+    if policy != "body":
+        raise ValueError(f"unknown MCA region policy '{policy}'")
+    if instructions[-1].get("is_terminator"):
+        return instructions[:-1]
+    return instructions
+
+
+def _compare_mca_results(source: dict, target: dict) -> dict:
+    comparison = {
+        "status": (
+            "ok"
+            if source["status"] == target["status"] == "ok"
+            else "error"
+        ),
+        "source": source,
+        "target": target,
+    }
+    if comparison["status"] == "ok":
+        comparison["delta"] = {
+            "instruction_count": (
+                target["instruction_count"] - source["instruction_count"]
+            ),
+            "uops_per_iteration": (
+                target["uops_per_iteration"]
+                - source["uops_per_iteration"]
+            ),
+            "block_rthroughput": (
+                target["block_rthroughput"]
+                - source["block_rthroughput"]
+            ),
+            "cycles_per_iteration": (
+                target["cycles_per_iteration"]
+                - source["cycles_per_iteration"]
+            ),
+        }
+        comparison["ratio"] = {
+            key: (
+                target[key] / source[key]
+                if source[key]
+                else None
+            )
+            for key in (
+                "instruction_count",
+                "uops_per_iteration",
+                "block_rthroughput",
+                "cycles_per_iteration",
+            )
+        }
+    return comparison
+
+
+def analyze_block_matches_with_mca(
+    model: dict,
+    mcpu: str,
+    iterations: int,
+    mattr: str = "",
+) -> None:
+    """Attach same-ISA llvm-mca results to accepted block matches."""
+    source_arch = model["source"]["arch"]
+    target_arch = model["target"]["arch"]
+    matching = model["report"]["block_matching"]
+    if source_arch != target_arch:
+        matching["mca"] = {
+            "status": "unsupported_cross_arch",
+            "source_arch": source_arch,
+            "target_arch": target_arch,
+            "error": (
+                "direct llvm-mca performance deltas require matching ISAs"
+            ),
+        }
+        return
+
+    source_blocks = dict(model["_source_blocks"])
+    target_blocks = dict(model["_target_blocks"])
+    policies = ("body", "full")
+    matching["mca"] = {
+        "status": "ok",
+        "arch": source_arch,
+        "mcpu": mcpu,
+        "mattr": mattr,
+        "iterations": iterations,
+        "noalias": True,
+        "region_policies": list(policies),
+        "analyzed_matches": len(matching["matches"]),
+    }
+
+    source_regions = {}
+    target_regions = {}
+    region_ids = {}
+    for match_index, match in enumerate(matching["matches"]):
+        region_ids[match_index] = {}
+        for policy in policies:
+            source_id = f"source_{match_index}_{policy}"
+            target_id = f"target_{match_index}_{policy}"
+            region_ids[match_index][policy] = (source_id, target_id)
+            source_regions[source_id] = _mca_region_instructions(
+                source_blocks[match["source_block"]],
+                policy,
+            )
+            target_regions[target_id] = _mca_region_instructions(
+                target_blocks[match["target_block"]],
+                policy,
+            )
+
+    source_results = run_llvm_mca_regions(
+        source_regions, source_arch, mcpu, iterations, mattr
+    )
+    target_results = run_llvm_mca_regions(
+        target_regions, target_arch, mcpu, iterations, mattr
+    )
+    for match_index, match in enumerate(matching["matches"]):
+        match["mca"] = {}
+        match["contains_call"] = {
+            "source": any(
+                instruction.get("is_call")
+                for instruction in source_blocks[match["source_block"]]
+            ),
+            "target": any(
+                instruction.get("is_call")
+                for instruction in target_blocks[match["target_block"]]
+            ),
+        }
+        for policy in policies:
+            source_id, target_id = region_ids[match_index][policy]
+            match["mca"][policy] = _compare_mca_results(
+                source_results[source_id],
+                target_results[target_id],
+            )
+
+
 def build_relation_components(address_relations: list[dict]) -> list[dict]:
     """Find connected components in the source/target block relation graph."""
     adjacency: dict[tuple[str, str], set[tuple[str, str]]] = {}
@@ -821,11 +1568,13 @@ def build_combined_cfg_model(
     debug_file: str,
     function: str,
 ) -> dict:
-    """Build source/target CFG data and relation components for one function."""
-    source_arch, source_all = objdump(source_path)
-    target_arch, target_all = objdump(target_path, debug_file)
-    source_funcs = collect_func_insns(source_all)
-    target_funcs = collect_func_insns(target_all)
+    """Build source/target LLVM MC CFG data and correlations for one function."""
+    source_arch, source_funcs = load_machine_cfg(
+        source_path, function_filter=function
+    )
+    target_arch, target_funcs = load_machine_cfg(
+        target_path, debug_file, function
+    )
 
     return _build_combined_cfg_model(
         source_arch,
@@ -839,9 +1588,9 @@ def build_combined_cfg_model(
 
 def _build_combined_cfg_model(
     source_arch: str,
-    source_funcs: dict[str, list[dict]],
+    source_funcs: dict[str, dict],
     target_arch: str,
-    target_funcs: dict[str, list[dict]],
+    target_funcs: dict[str, dict],
     instruction_map: dict[str, dict[int, dict[str, object]]],
     function: str,
 ) -> dict:
@@ -852,35 +1601,72 @@ def _build_combined_cfg_model(
     if function not in target_funcs:
         raise ValueError(f"function '{function}' not found in target binary")
 
-    source_blocks, source_edges = build_cfg(
-        source_funcs[function], source_arch
-    )
-    target_blocks, target_edges = build_cfg(
-        target_funcs[function], target_arch
-    )
+    source_graph = source_funcs[function]
+    target_graph = target_funcs[function]
+    source_blocks = source_graph["blocks"]
+    source_edges = source_graph["edges"]
+    target_blocks = target_graph["blocks"]
+    target_edges = target_graph["edges"]
     source_instructions = instruction_map[function]
     arm_inst_to_source_block = align_source_blocks_with_instruction_map(
         source_blocks, source_instructions
     )
+    line_to_arm_inst = {
+        instruction["dwarf_line"]: arm_inst_id
+        for arm_inst_id, instruction in source_instructions.items()
+        if is_correlatable_source_instruction(instruction)
+    }
+    for _, instructions in target_blocks:
+        for instruction in instructions:
+            instruction["arm_inst_id"] = line_to_arm_inst.get(
+                instruction.get("dwarf_line")
+            )
+
     report = build_block_relations(target_blocks, source_instructions)
     address_relations = build_address_block_relations(
         report, arm_inst_to_source_block
     )
     components = build_relation_components(address_relations)
+    similarity_records = build_block_similarity_records(
+        source_blocks, target_blocks, source_arch
+    )
+    block_matching = select_one_to_one_block_matches(
+        similarity_records,
+        [block_name for block_name, _ in source_blocks],
+        [block_name for block_name, _ in target_blocks],
+    )
+    block_matching["similarities"] = similarity_records
     report.update({
         "function": function,
         "source_arch": source_arch,
         "target_arch": target_arch,
         "address_relations": address_relations,
         "components": components,
+        "block_matching": block_matching,
+        "machine_cfg": {
+            "source": {
+                "arch": source_arch,
+                "section": source_graph["section"],
+                "address": source_graph["address"],
+                "size": source_graph["size"],
+                "instructions": source_graph["instructions"],
+                "blocks": source_graph["block_records"],
+                "edges": source_graph["cfg_edges"],
+                "errors": source_graph["errors"],
+            },
+            "target": {
+                "arch": target_arch,
+                "section": target_graph["section"],
+                "address": target_graph["address"],
+                "size": target_graph["size"],
+                "instructions": target_graph["instructions"],
+                "blocks": target_graph["block_records"],
+                "edges": target_graph["cfg_edges"],
+                "errors": target_graph["errors"],
+            },
+        },
         "target_function_missing": False,
     })
-
-    line_to_arm_inst = {
-        instruction["dwarf_line"]: arm_inst_id
-        for arm_inst_id, instruction in source_instructions.items()
-        if is_correlatable_source_instruction(instruction)
-    }
 
     def block_data(
         blocks: list[tuple[str, list[dict]]],
@@ -893,6 +1679,9 @@ def _build_combined_cfg_model(
                 output_instruction = {
                     "address": f"{instruction['addr']:x}",
                     "text": instruction["raw"],
+                    "flow_kind": instruction.get("flow_kind"),
+                    "is_terminator": instruction.get("is_terminator", False),
+                    "is_call": instruction.get("is_call", False),
                 }
                 if is_source:
                     output_instruction["arm_inst_id"] = instruction.get(
@@ -905,8 +1694,8 @@ def _build_combined_cfg_model(
                     output_instruction["dwarf_line"] = instruction.get(
                         "dwarf_line"
                     )
-                    output_instruction["arm_inst_id"] = line_to_arm_inst.get(
-                        instruction.get("dwarf_line")
+                    output_instruction["arm_inst_id"] = instruction.get(
+                        "arm_inst_id"
                     )
                 output_instructions.append(output_instruction)
             result.append({
@@ -924,6 +1713,7 @@ def _build_combined_cfg_model(
                 {"source": source, "target": target, "label": label}
                 for source, target, label in source_edges
             ],
+            "cfg_edges": source_graph["cfg_edges"],
         },
         "target": {
             "arch": target_arch,
@@ -932,6 +1722,7 @@ def _build_combined_cfg_model(
                 {"source": source, "target": target, "label": label}
                 for source, target, label in target_edges
             ],
+            "cfg_edges": target_graph["cfg_edges"],
         },
         "report": report,
         "_source_blocks": source_blocks,
@@ -948,11 +1739,18 @@ def build_combined_cfg_models(
     debug_file: str,
     functions: list[str] | None = None,
 ) -> dict[str, dict]:
-    """Build correlation models for all requested functions in one objdump pass."""
-    source_arch, source_all = objdump(source_path)
-    target_arch, target_all = objdump(target_path, debug_file)
-    source_funcs = collect_func_insns(source_all)
-    target_funcs = collect_func_insns(target_all)
+    """Build correlation models from one LLVM MC CFG dump per binary."""
+    function_filter = (
+        functions[0]
+        if functions is not None and len(functions) == 1
+        else None
+    )
+    source_arch, source_funcs = load_machine_cfg(
+        source_path, function_filter=function_filter
+    )
+    target_arch, target_funcs = load_machine_cfg(
+        target_path, debug_file, function_filter
+    )
 
     available = set(instruction_map) & set(source_funcs) & set(target_funcs)
     requested = functions if functions is not None else sorted(available)
@@ -1939,6 +2737,159 @@ def dump_block_relations(report: dict) -> None:
         )
 
 
+def dump_block_matches(model: dict) -> None:
+    """Print accepted one-to-one block matches and unmatched candidates."""
+    function = model["function"]
+    matching = model["report"]["block_matching"]
+    thresholds = matching["thresholds"]
+    source_blocks = {
+        block["id"]: block for block in model["source"]["blocks"]
+    }
+    target_blocks = {
+        block["id"]: block for block in model["target"]["blocks"]
+    }
+    candidates_by_source: dict[str, list[dict]] = {}
+    candidates_by_target: dict[str, list[dict]] = {}
+    for candidate in matching["similarities"]:
+        candidates_by_source.setdefault(
+            candidate["source_block"], []
+        ).append(candidate)
+        candidates_by_target.setdefault(
+            candidate["target_block"], []
+        ).append(candidate)
+
+    print(f"\n=== Block matching: {function} ===")
+    print(
+        f"Source: {model['source']['arch']}  "
+        f"Target: {model['target']['arch']}"
+    )
+    mca_report = matching.get("mca")
+    if mca_report and mca_report["status"] != "ok":
+        print(f"llvm-mca: {mca_report['error']}")
+
+    for match in matching["matches"]:
+        print(
+            f"\nMATCH {match['source_block']} -> {match['target_block']}"
+        )
+        print(f"  score:             {match['score']:.3f}")
+        print(
+            f"  source coverage:   {match['source_coverage']:.1%}"
+        )
+        print(f"  target purity:     {match['target_purity']:.1%}")
+        print(
+            f"  order similarity:  {match['order_similarity']:.1%}"
+        )
+        print(f"  ARM IDs:           {match['arm_inst_ids']}")
+
+        print("\n  Source:")
+        for instruction in source_blocks[
+            match["source_block"]
+        ]["instructions"]:
+            print(f"    {instruction['text']}")
+
+        print("\n  Target:")
+        for instruction in target_blocks[
+            match["target_block"]
+        ]["instructions"]:
+            print(f"    {instruction['text']}")
+
+        mca = match.get("mca")
+        if mca:
+            for policy in ("body", "full"):
+                comparison = mca[policy]
+                print(f"\n  llvm-mca ({policy}):")
+                if comparison["status"] != "ok":
+                    source_error = comparison["source"].get("error")
+                    target_error = comparison["target"].get("error")
+                    if source_error:
+                        print(f"    source error: {source_error}")
+                    if target_error:
+                        print(f"    target error: {target_error}")
+                    continue
+
+                source = comparison["source"]
+                target = comparison["target"]
+                delta = comparison["delta"]
+                print(
+                    "    metric                 source      target"
+                    "       delta"
+                )
+                print(
+                    f"    instructions        "
+                    f"{source['instruction_count']:>8}  "
+                    f"{target['instruction_count']:>10}  "
+                    f"{delta['instruction_count']:>+10}"
+                )
+                print(
+                    f"    uOps/iteration      "
+                    f"{source['uops_per_iteration']:>8.2f}  "
+                    f"{target['uops_per_iteration']:>10.2f}  "
+                    f"{delta['uops_per_iteration']:>+10.2f}"
+                )
+                print(
+                    f"    block throughput    "
+                    f"{source['block_rthroughput']:>8.2f}  "
+                    f"{target['block_rthroughput']:>10.2f}  "
+                    f"{delta['block_rthroughput']:>+10.2f}"
+                )
+                print(
+                    f"    cycles/iteration    "
+                    f"{source['cycles_per_iteration']:>8.2f}  "
+                    f"{target['cycles_per_iteration']:>10.2f}  "
+                    f"{delta['cycles_per_iteration']:>+10.2f}"
+                )
+            if any(match.get("contains_call", {}).values()):
+                print("  note: call cost excludes callee execution")
+
+    print("\nUNMATCHED SOURCE")
+    if not matching["unmatched_source_blocks"]:
+        print("  (none)")
+    for block_name in matching["unmatched_source_blocks"]:
+        candidates = sorted(
+            candidates_by_source.get(block_name, []),
+            key=lambda candidate: -candidate["score"],
+        )
+        if candidates:
+            best = candidates[0]
+            if best["score"] < thresholds["min_score"]:
+                reason = "below threshold"
+            elif (best["matched_weight"]
+                  < thresholds["min_matched_weight"]):
+                reason = "insufficient evidence"
+            else:
+                reason = "ambiguous"
+            print(
+                f"  {block_name}: best {best['target_block']}, "
+                f"score={best['score']:.3f} ({reason})"
+            )
+        else:
+            print(f"  {block_name}: no instruction correspondence")
+
+    print("\nUNMATCHED TARGET")
+    if not matching["unmatched_target_blocks"]:
+        print("  (none)")
+    for block_name in matching["unmatched_target_blocks"]:
+        candidates = sorted(
+            candidates_by_target.get(block_name, []),
+            key=lambda candidate: -candidate["score"],
+        )
+        if candidates:
+            best = candidates[0]
+            if best["score"] < thresholds["min_score"]:
+                reason = "below threshold"
+            elif (best["matched_weight"]
+                  < thresholds["min_matched_weight"]):
+                reason = "insufficient evidence"
+            else:
+                reason = "ambiguous"
+            print(
+                f"  {block_name}: best {best['source_block']}, "
+                f"score={best['score']:.3f} ({reason})"
+            )
+        else:
+            print(f"  {block_name}: no instruction correspondence")
+
+
 def handle_obj(path: str, out_dir: str, fmt: str, func_filter: str | None,
                stem: str | None = None, text: bool = False,
                debug_file: str | None = None,
@@ -2097,6 +3048,32 @@ def main():
         metavar="HTML",
         help="Write an interactive self-contained HTML correlation viewer",
     )
+    parser.add_argument(
+        "--block-match",
+        action="store_true",
+        help="Print conservative one-to-one source/target block matches",
+    )
+    parser.add_argument(
+        "--mca",
+        action="store_true",
+        help="Run llvm-mca for accepted same-ISA block matches",
+    )
+    parser.add_argument(
+        "--mcpu",
+        default="generic",
+        help="CPU model for --mca (default: generic)",
+    )
+    parser.add_argument(
+        "--mattr",
+        default="",
+        help="Target features for --mca (e.g. +sve,-crypto)",
+    )
+    parser.add_argument(
+        "--mca-iterations",
+        type=int,
+        default=100,
+        help="llvm-mca iterations per block (default: 100)",
+    )
 
     args = parser.parse_args()
 
@@ -2108,6 +3085,14 @@ def main():
         parser.error("--source-object requires --function")
     if args.viewer is not None and not args.source_object:
         parser.error("--viewer requires --source-object")
+    if args.block_match and not args.source_object:
+        parser.error("--block-match requires --source-object")
+    if args.block_match and args.viewer is not None:
+        parser.error("--block-match cannot be combined with --viewer")
+    if args.mca and not args.block_match:
+        parser.error("--mca requires --block-match")
+    if args.mca_iterations <= 0:
+        parser.error("--mca-iterations must be positive")
 
     in_path = os.path.abspath(args.input)
     if not os.path.isfile(in_path):
@@ -2142,18 +3127,31 @@ def main():
                 debug_file,
                 args.function,
             )
-            combined_path, report = render_combined_cfg_from_model(
-                model,
-                out_dir,
-                source_path,
-                in_path,
-                args.fmt,
-            )
+            report = model["report"]
+            if args.block_match:
+                if args.mca:
+                    analyze_block_matches_with_mca(
+                        model,
+                        args.mcpu,
+                        args.mca_iterations,
+                        args.mattr,
+                    )
+                dump_block_matches(model)
+                rendered = []
+            else:
+                combined_path, report = render_combined_cfg_from_model(
+                    model,
+                    out_dir,
+                    source_path,
+                    in_path,
+                    args.fmt,
+                )
+                rendered = [combined_path]
         except (ValueError, RuntimeError) as error:
             parser.error(str(error))
-        rendered = [combined_path]
         relation_reports = [report]
-        print(f"Combined CFG: {combined_path}")
+        if not args.block_match:
+            print(f"Combined CFG: {combined_path}")
         if args.viewer is not None:
             viewer_path = (
                 os.path.abspath(args.viewer)

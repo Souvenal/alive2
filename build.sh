@@ -20,5 +20,5 @@ cmake -B build -S . \
 # ── Build ────────────────────────────────────────────────
 cmake --build build \
   --config Release \
-  --target arm-lifter \
+  --target arm-lifter machine-cfg-dump \
   -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"

@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,15 +11,19 @@ import cfg
 from cfg import (
     align_source_blocks_with_instruction_map,
     build_address_block_relations,
+    build_block_similarity_records,
     build_block_relations,
     build_combined_cfg_dot,
     build_combined_cfg_models,
     build_cfg,
     build_missing_function_report,
     build_relation_components,
+    dump_block_matches,
     extract_target_addr,
     parse_objdump_output,
     render_interactive_viewer,
+    run_llvm_mca_for_block,
+    select_one_to_one_block_matches,
 )
 
 
@@ -424,6 +430,309 @@ def test_relation_components_group_many_to_many_blocks() -> None:
     ]
 
 
+def test_block_similarity_uses_coverage_purity_and_collapsed_order() -> None:
+    source_blocks = [
+        (
+            "S1",
+            [
+                {"arm_inst_id": 1, "mnemonic": "add"},
+                {"arm_inst_id": 2, "mnemonic": "cmp"},
+                {"arm_inst_id": 3, "mnemonic": "b.eq"},
+            ],
+        ),
+        ("S2", [{"arm_inst_id": 4, "mnemonic": "ret"}]),
+    ]
+    target_blocks = [
+        (
+            "T1",
+            [
+                {"arm_inst_id": 1, "mnemonic": "add"},
+                {"arm_inst_id": 1, "mnemonic": "mov"},
+                {"arm_inst_id": 2, "mnemonic": "cmp"},
+                {"arm_inst_id": 3, "mnemonic": "je"},
+            ],
+        ),
+        (
+            "T2",
+            [
+                {"arm_inst_id": 2, "mnemonic": "mov"},
+                {"arm_inst_id": 4, "mnemonic": "ret"},
+            ],
+        ),
+    ]
+
+    records = build_block_similarity_records(
+        source_blocks,
+        target_blocks,
+        "aarch64",
+    )
+    by_pair = {
+        (record["source_block"], record["target_block"]): record
+        for record in records
+    }
+
+    exact = by_pair[("S1", "T1")]
+    assert exact["source_coverage"] == pytest.approx(1.0)
+    assert exact["target_purity"] == pytest.approx(1.0)
+    assert exact["order_similarity"] == pytest.approx(1.0)
+    assert exact["score"] == pytest.approx(1.0)
+    assert exact["arm_inst_ids"] == [1, 2, 3]
+
+    contaminated = by_pair[("S1", "T2")]
+    assert contaminated["source_coverage"] < exact["source_coverage"]
+    assert contaminated["target_purity"] < exact["target_purity"]
+    assert contaminated["score"] < exact["score"]
+
+
+def test_one_to_one_matching_accepts_only_unambiguous_mutual_best() -> None:
+    records = [
+        {
+            "source_block": "S1",
+            "target_block": "T1",
+            "score": 0.95,
+            "matched_weight": 2.0,
+        },
+        {
+            "source_block": "S1",
+            "target_block": "T2",
+            "score": 0.40,
+            "matched_weight": 1.0,
+        },
+        {
+            "source_block": "S2",
+            "target_block": "T1",
+            "score": 0.30,
+            "matched_weight": 1.0,
+        },
+        {
+            "source_block": "S2",
+            "target_block": "T2",
+            "score": 0.90,
+            "matched_weight": 2.0,
+        },
+    ]
+
+    result = select_one_to_one_block_matches(
+        records,
+        ["S1", "S2"],
+        ["T1", "T2"],
+    )
+
+    assert [
+        (match["source_block"], match["target_block"])
+        for match in result["matches"]
+    ] == [("S1", "T1"), ("S2", "T2")]
+    assert result["unmatched_source_blocks"] == []
+    assert result["unmatched_target_blocks"] == []
+
+
+def test_one_to_one_matching_rejects_ambiguous_candidates() -> None:
+    records = [
+        {
+            "source_block": "S1",
+            "target_block": "T1",
+            "score": 0.90,
+            "matched_weight": 2.0,
+        },
+        {
+            "source_block": "S1",
+            "target_block": "T2",
+            "score": 0.85,
+            "matched_weight": 2.0,
+        },
+    ]
+
+    result = select_one_to_one_block_matches(
+        records,
+        ["S1"],
+        ["T1", "T2"],
+    )
+
+    assert result["matches"] == []
+    assert result["unmatched_source_blocks"] == ["S1"]
+    assert result["unmatched_target_blocks"] == ["T1", "T2"]
+    assert result["ambiguous_source_blocks"] == ["S1"]
+
+
+def test_run_llvm_mca_for_block_parses_json(monkeypatch) -> None:
+    calls = {}
+    monkeypatch.setattr(cfg, "require_tool", lambda name: "/llvm-mca")
+
+    def run(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+        return cfg.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({
+                "TargetInfo": {
+                    "Resources": ["ALU.\u0000"],
+                },
+                "CodeRegions": [{
+                    "Name": "block",
+                    "Instructions": ["add w0, w0, #1", "ret"],
+                    "ResourcePressureView": {
+                        "ResourcePressureInfo": [{
+                            "InstructionIndex": 2,
+                            "ResourceIndex": 0,
+                            "ResourceUsage": 1.5,
+                        }],
+                    },
+                    "SummaryView": {
+                        "BlockRThroughput": 1.5,
+                        "DispatchWidth": 4,
+                        "IPC": 2.0,
+                        "Instructions": 200,
+                        "Iterations": 100,
+                        "TotalCycles": 100,
+                        "TotaluOps": 300,
+                        "uOpsPerCycle": 3.0,
+                    },
+                }],
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(cfg.subprocess, "run", run)
+
+    result = run_llvm_mca_for_block(
+        [
+            {"mnemonic": "add", "operands": "w0, w0, #1"},
+            {"mnemonic": "b.ne", "operands": "0x8 <foo+0x8>"},
+        ],
+        "aarch64",
+        "cortex-x2",
+        100,
+    )
+
+    assert result["status"] == "ok"
+    assert result["instruction_count"] == 2
+    assert result["uops_per_iteration"] == pytest.approx(3.0)
+    assert result["block_rthroughput"] == pytest.approx(1.5)
+    assert result["resource_pressure"] == {"ALU.0": 1.5}
+    assert calls["command"] == [
+        "/llvm-mca",
+        "-mtriple=aarch64-linux-gnu",
+        "-mcpu=cortex-x2",
+        "--iterations=100",
+        "--json",
+        "-",
+    ]
+    assert calls["kwargs"]["input"] == (
+        ".text\n"
+        "# LLVM-MCA-BEGIN block\n"
+        "add w0, w0, #1\n"
+        "b.ne 0x8\n"
+        "# LLVM-MCA-END block\n"
+    )
+
+
+def test_mca_region_policy_excludes_only_terminator() -> None:
+    instructions = [
+        {"mnemonic": "add", "is_terminator": False},
+        {"mnemonic": "b.ne", "is_terminator": True},
+    ]
+
+    assert cfg._mca_region_instructions(instructions, "body") == [
+        instructions[0]
+    ]
+    assert cfg._mca_region_instructions(instructions, "full") == instructions
+
+
+def test_analyze_block_matches_batches_body_and_full_regions(
+    monkeypatch,
+) -> None:
+    instruction = {
+        "mnemonic": "add",
+        "operands": "w0, w0, #1",
+        "is_terminator": False,
+        "is_call": False,
+    }
+    terminator = {
+        "mnemonic": "ret",
+        "operands": "",
+        "is_terminator": True,
+        "is_call": False,
+    }
+    model = {
+        "source": {"arch": "aarch64"},
+        "target": {"arch": "aarch64"},
+        "_source_blocks": [("S1", [instruction, terminator])],
+        "_target_blocks": [("T1", [instruction, terminator])],
+        "report": {
+            "block_matching": {
+                "matches": [{
+                    "source_block": "S1",
+                    "target_block": "T1",
+                }],
+            },
+        },
+    }
+    calls = []
+
+    def run(regions, arch, mcpu, iterations, mattr=""):
+        calls.append(regions)
+        return {
+            name: {
+                "status": "ok",
+                "instruction_count": len(region),
+                "uops_per_iteration": float(len(region)),
+                "block_rthroughput": float(len(region)),
+                "cycles_per_iteration": float(len(region)),
+            }
+            for name, region in regions.items()
+        }
+
+    monkeypatch.setattr(cfg, "run_llvm_mca_regions", run)
+
+    cfg.analyze_block_matches_with_mca(model, "generic", 100)
+
+    assert len(calls) == 2
+    assert [len(region) for region in calls[0].values()] == [1, 2]
+    match = model["report"]["block_matching"]["matches"][0]
+    assert match["mca"]["body"]["source"]["instruction_count"] == 1
+    assert match["mca"]["full"]["source"]["instruction_count"] == 2
+
+
+def test_dump_block_matches_reports_insufficient_evidence(capsys) -> None:
+    model = {
+        "function": "foo",
+        "source": {
+            "arch": "aarch64",
+            "blocks": [{"id": "S1", "instructions": []}],
+        },
+        "target": {
+            "arch": "aarch64",
+            "blocks": [{"id": "T1", "instructions": []}],
+        },
+        "report": {
+            "block_matching": {
+                "matches": [],
+                "unmatched_source_blocks": ["S1"],
+                "unmatched_target_blocks": ["T1"],
+                "ambiguous_source_blocks": [],
+                "ambiguous_target_blocks": [],
+                "similarities": [{
+                    "source_block": "S1",
+                    "target_block": "T1",
+                    "score": 1.0,
+                    "matched_weight": 0.25,
+                }],
+                "thresholds": {
+                    "min_score": 0.75,
+                    "min_margin": 0.15,
+                    "min_matched_weight": 1.0,
+                },
+            },
+        },
+    }
+
+    dump_block_matches(model)
+
+    output = capsys.readouterr().out
+    assert output.count("insufficient evidence") == 2
+
+
 def test_combined_cfg_dot_frames_relation_components() -> None:
     source_blocks = [
         (
@@ -498,19 +807,17 @@ def test_render_interactive_viewer_embeds_cfg_data(tmp_path) -> None:
 
 
 def test_build_combined_cfg_models_defaults_to_shared_functions(monkeypatch) -> None:
-    monkeypatch.setattr(
-        cfg,
-        "objdump",
-        lambda path, debug_file=None: ("arch", []),
-    )
     function_sets = iter([
-        {"source_only": [], "foo": [], "bar": []},
-        {"target_only": [], "foo": [], "bar": []},
+        {"source_only": {}, "foo": {}, "bar": {}},
+        {"target_only": {}, "foo": {}, "bar": {}},
     ])
     monkeypatch.setattr(
         cfg,
-        "collect_func_insns",
-        lambda instructions: next(function_sets),
+        "load_machine_cfg",
+        lambda path, debug_file=None, function_filter=None: (
+            "arch",
+            next(function_sets),
+        ),
     )
     built = []
     monkeypatch.setattr(
@@ -528,6 +835,249 @@ def test_build_combined_cfg_models_defaults_to_shared_functions(monkeypatch) -> 
 
     assert list(models) == ["bar", "foo"]
     assert built == ["bar", "foo"]
+
+
+def test_load_machine_cfg_builds_blocks_edges_and_debug_lines(
+    monkeypatch,
+) -> None:
+    bundle = {
+        "version": 1,
+        "binary": {"architecture": "x86_64"},
+        "functions": [{
+            "name": "foo",
+            "section": ".text",
+            "address": 0x10,
+            "size": 4,
+            "errors": [],
+            "instructions": [
+                {
+                    "address": 0x10,
+                    "size": 2,
+                    "bytes": "90",
+                    "opcode": "NOOP",
+                    "opcode_id": 1,
+                    "assembly": "nop",
+                    "mnemonic": "nop",
+                    "operands": "",
+                    "flow_kind": "none",
+                    "is_terminator": False,
+                    "is_call": False,
+                    "direct_target": None,
+                    "relocation_symbol": None,
+                },
+                {
+                    "address": 0x12,
+                    "size": 2,
+                    "bytes": "c3",
+                    "opcode": "RET64",
+                    "opcode_id": 2,
+                    "assembly": "retq",
+                    "mnemonic": "retq",
+                    "operands": "",
+                    "flow_kind": "return",
+                    "is_terminator": True,
+                    "is_call": False,
+                    "direct_target": None,
+                    "relocation_symbol": None,
+                },
+            ],
+            "blocks": [{
+                "id": "L10",
+                "instruction_indices": [0, 1],
+            }],
+            "edges": [{
+                "source": "L10",
+                "target": None,
+                "kind": "return",
+                "resolution": "terminal",
+                "target_address": None,
+                "target_symbol": None,
+            }],
+        }],
+    }
+    monkeypatch.setattr(cfg, "require_machine_cfg_dump", lambda: "/cfg-dump")
+    monkeypatch.setattr(
+        cfg.subprocess,
+        "run",
+        lambda *args, **kwargs: cfg.subprocess.CompletedProcess(
+            args[0], 0, stdout=json.dumps(bundle), stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        cfg,
+        "objdump",
+        lambda path, debug_file=None: (
+            "x86-64",
+            [{
+                "func": "foo",
+                "addr": 0x10,
+                "dwarf_line": 7,
+            }],
+        ),
+    )
+
+    arch, functions = cfg.load_machine_cfg("foo.o", "arm_asm.s")
+
+    assert arch == "x86-64"
+    block_name, instructions = functions["foo"]["blocks"][0]
+    assert block_name == "L10"
+    assert [instruction["addr"] for instruction in instructions] == [
+        0x10,
+        0x12,
+    ]
+    assert instructions[0]["dwarf_line"] == 7
+    assert instructions[1]["dwarf_line"] is None
+    assert functions["foo"]["edges"] == []
+    assert functions["foo"]["cfg_edges"][0]["kind"] == "return"
+
+
+def test_machine_cfg_dump_recovers_aarch64_direct_control_flow(
+    tmp_path,
+) -> None:
+    llvm_mc = shutil.which("llvm-mc")
+    try:
+        machine_cfg_dump = cfg.require_machine_cfg_dump()
+    except RuntimeError:
+        pytest.skip("machine-cfg-dump is not built")
+    if llvm_mc is None:
+        pytest.skip("llvm-mc is not available")
+
+    assembly = tmp_path / "foo.s"
+    object_path = tmp_path / "foo.o"
+    assembly.write_text(
+        """
+.text
+.globl foo
+.type foo, %function
+foo:
+  cmp w0, #0
+  b.eq .Lret
+  add w0, w0, #1
+.Lret:
+  ret
+.size foo, .-foo
+""",
+        encoding="utf-8",
+    )
+    assembled = subprocess.run(
+        [
+            llvm_mc,
+            "-triple=aarch64-linux-gnu",
+            "-filetype=obj",
+            str(assembly),
+            "-o",
+            str(object_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert assembled.returncode == 0, assembled.stderr
+
+    dumped = subprocess.run(
+        [machine_cfg_dump, str(object_path), "--function=foo"],
+        capture_output=True,
+        text=True,
+    )
+    assert dumped.returncode == 0, dumped.stderr
+    function = json.loads(dumped.stdout)["functions"][0]
+
+    assert [block["id"] for block in function["blocks"]] == [
+        "L0",
+        "L8",
+        "Lc",
+    ]
+    assert [block["key"] for block in function["blocks"]] == [
+        "foo+0x0",
+        "foo+0x8",
+        "foo+0xc",
+    ]
+    assert function["instructions"][0]["id"] == "foo+0x0"
+    assert [
+        (edge["source"], edge["target"], edge["kind"])
+        for edge in function["edges"]
+    ] == [
+        ("L0", "Lc", "branch_taken"),
+        ("L0", "L8", "branch_not_taken"),
+        ("L8", "Lc", "fallthrough"),
+        ("Lc", None, "return"),
+    ]
+
+
+def test_machine_cfg_dump_keeps_calls_and_marks_indirect_exits(
+    tmp_path,
+) -> None:
+    llvm_mc = shutil.which("llvm-mc")
+    try:
+        machine_cfg_dump = cfg.require_machine_cfg_dump()
+    except RuntimeError:
+        pytest.skip("machine-cfg-dump is not built")
+    if llvm_mc is None:
+        pytest.skip("llvm-mc is not available")
+
+    assembly = tmp_path / "flows.s"
+    object_path = tmp_path / "flows.o"
+    assembly.write_text(
+        """
+.text
+.globl caller
+.type caller, %function
+caller:
+  bl external
+  add w0, w0, #1
+  ret
+.size caller, .-caller
+
+.globl indirect
+.type indirect, %function
+indirect:
+  br x0
+.size indirect, .-indirect
+""",
+        encoding="utf-8",
+    )
+    assembled = subprocess.run(
+        [
+            llvm_mc,
+            "-triple=aarch64-linux-gnu",
+            "-filetype=obj",
+            str(assembly),
+            "-o",
+            str(object_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert assembled.returncode == 0, assembled.stderr
+
+    dumped = subprocess.run(
+        [machine_cfg_dump, str(object_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert dumped.returncode == 0, dumped.stderr
+    functions = {
+        function["name"]: function
+        for function in json.loads(dumped.stdout)["functions"]
+    }
+
+    caller = functions["caller"]
+    assert len(caller["blocks"]) == 1
+    assert caller["blocks"][0]["contains_call"] is True
+    assert caller["instructions"][0]["relocation_symbol"] == "external"
+    assert [edge["kind"] for edge in caller["edges"]] == ["return"]
+
+    indirect = functions["indirect"]
+    assert indirect["blocks"][0]["has_unresolved_exit"] is True
+    assert indirect["edges"] == [{
+        "source": "Lc",
+        "source_key": "indirect+0x0",
+        "target": None,
+        "target_key": None,
+        "kind": "indirect",
+        "resolution": "unresolved",
+        "target_address": None,
+        "target_symbol": None,
+    }]
 
 
 def test_cmd_viewer_builds_and_opens_html(tmp_path, monkeypatch) -> None:
