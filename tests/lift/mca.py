@@ -28,9 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from conftest import (
     ARM_LIFTER,
-    LLC,
     CASES_DIR,
-    CLANG,
     CFLAGS,
     PROJECT_ROOT,
     _to_vm_path,
@@ -40,6 +38,7 @@ from conftest import (
     run_in_vm,
 )
 from test_lift import CASE_MARKS
+from toolchain import llvm_tool
 
 
 # --- Regex patterns for parsing llvm-mca summary ---
@@ -108,8 +107,8 @@ def _ensure_asm(name: str, outdir: Path) -> tuple[Path, Path]:
     nodbg_ll = outdir / f"{name}.nodbg.ll"
     vm_src = _to_vm_path(src)
     r = run_in_vm(
-        [CLANG] + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", vm_src, "-o",
-         str(nodbg_ll)]
+        [llvm_tool("clang")] + CFLAGS + xcflags
+        + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
     )
     if r.returncode != 0:
         print(f"nodbg compile failed:\n{r.stderr}", file=sys.stderr)
@@ -131,7 +130,8 @@ def _ensure_asm(name: str, outdir: Path) -> tuple[Path, Path]:
         vm_ll = _to_vm_path(ll_path)
         vm_s = _to_vm_path(s_path)
         r = run_in_vm(
-            [LLC, "-mtriple=aarch64-linux-gnu", "-O2", vm_ll, "-o", vm_s]
+            [llvm_tool("llc"), "-mtriple=aarch64-linux-gnu", "-O2",
+             vm_ll, "-o", vm_s]
         )
         if r.returncode != 0:
             print(f"LLC failed for {ll_path.name}:\n{r.stderr}", file=sys.stderr)
@@ -166,7 +166,8 @@ def run_mca(
     vm_s = _to_vm_path(s_path)
     cmd = (
         _vm_prefix()
-        + ["llvm-mca", f"-mtriple=aarch64-linux-gnu", f"-mcpu={mcpu}"]
+        + [llvm_tool("llvm-mca"), f"-mtriple=aarch64-linux-gnu",
+           f"-mcpu={mcpu}"]
         + opts
         + [vm_s]
     )

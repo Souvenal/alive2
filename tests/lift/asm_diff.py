@@ -12,6 +12,8 @@ import subprocess
 import sys
 from collections import defaultdict
 
+from toolchain import find_host_llvm_tool
+
 
 def parse_instruction_map(
     map_path: str,
@@ -79,7 +81,9 @@ def parse_instruction_map(
 def detect_arch(bin_path: str) -> str:
     """Detect target architecture from binary header."""
     result = subprocess.run(
-        ["llvm-objdump", "-f", bin_path], capture_output=True, text=True
+        [find_host_llvm_tool("llvm-objdump"), "-f", bin_path],
+        capture_output=True,
+        text=True,
     )
     m = re.search(r"file format\s+(\S+)", result.stdout)
     return m.group(1) if m else "unknown"
@@ -90,7 +94,7 @@ def parse_objdump(
 ) -> dict[str, dict[int, list[str]]]:
     """Map synthetic DWARF lines in the target binary to target instructions."""
     result = subprocess.run(
-        ["llvm-objdump", "-d", "--line-numbers", bin_path],
+        [find_host_llvm_tool("llvm-objdump"), "-d", "--line-numbers", bin_path],
         capture_output=True,
         text=True,
     )

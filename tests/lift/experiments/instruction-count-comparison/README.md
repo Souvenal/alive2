@@ -2,8 +2,8 @@
 
 `run.sh` 对比同一份 C 程序通过两种路径生成的汇编规模：
 
-1. **参考路径**：C → `zig cc` → AArch64 `.o`（标准一次编译）
-2. **Lift 路径**：C → `zig cc` → `.bc` + `.o` → `arm-lifter` → `.ll` → `llc` → ARM64 `.o`（经过 lifter 二次编译）
+1. **参考路径**：C → `clang` → AArch64 `.o`（标准一次编译）
+2. **Lift 路径**：C → `clang` → `.bc` + `.o` → `arm-lifter` → `.ll` → `llc` → ARM64 `.o`（经过 lifter 二次编译）
 
 测试用例 `compiler_rt_int128.c`（本目录内）使用 `unsigned __int128` 算术运算。
 AArch64 没有原生的 128 位整数除法指令，编译器后端会将 `udiv i128` 降级为对
@@ -16,7 +16,8 @@ AArch64 没有原生的 128 位整数除法指令，编译器后端会将 `udiv 
 ./run.sh [case_name]      # 默认 compiler_rt_int128
 ```
 
-环境要求：`zig`、`llvm-objdump`、`llvm-dis`、`llc`、`opt` 在 `PATH` 上。
+Linux 环境要求：设置 `LLVM_VERSION=20` 使用版本化工具，或设置 `LLVM_BIN` 到
+包含 LLVM 20+ 工具的 `bin` 目录。
 可通过 `ARM_LIFTER` 环境变量指定自定义的 arm-lifter 路径。
 
 ## 输出文件
@@ -31,7 +32,7 @@ AArch64 没有原生的 128 位整数除法指令，编译器后端会将 `udiv 
 | `out_<case>/<case>.lifted.opt.ll` | `opt -O2` 后的 lifted IR |
 | `out_<case>/<case>.lift.log` | arm-lifter 调试日志 |
 
-`.bc` 和 `.o` 是编译器产物（`zig cc` 生成，lifter 变化不影响）。
+`.bc` 和 `.o` 是编译器产物（LLVM 20+ `clang` 生成，lifter 变化不影响）。
 重新运行 `./run.sh` 即可用当前 arm-lifter 刷新所有结果。
 
 ## 为什么指令更多？

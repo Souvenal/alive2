@@ -15,8 +15,8 @@ every command to the VM transparently:
 **`arm-lifter` is the only component that runs natively on the host** — it
 is a macOS binary on Darwin, a Linux binary on Linux, etc.
 
-Inside the Linux VM the standard LLVM toolchain (`clang`, `llvm-dis`, `llc`)
-is used for all compilation steps, replacing the old `zig cc` approach.
+Inside the Linux VM an LLVM 20-or-newer toolchain is used for all compilation
+steps, replacing the old `zig cc` approach.
 
 ## Prerequisites
 
@@ -26,17 +26,26 @@ is used for all compilation steps, replacing the old `zig cc` approach.
 - **macOS**: Lima VM running (`limactl start`). Homebrew: `brew install lima`
 - **Windows**: WSL installed and configured
 
-### Linux VM prerequisites (inside Lima or WSL)
+### Linux prerequisites
 
+The test pipeline requires LLVM 20 or newer. Debian/Ubuntu packages commonly
+install versioned commands, so select that toolchain explicitly:
+
+```bash
+export LLVM_VERSION=20
 ```
-sudo apt install clang llvm qemu-user gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+
+For a locally built LLVM installation containing unversioned tools, use:
+
+```bash
+export LLVM_BIN=/opt/llvm-22/bin
 ```
 
 | Tool | Purpose |
 |------|---------|
-| `clang` | Compile C → ARM64 bitcode + object files |
-| `llvm-dis` | Disassemble `.bc` → `.ll` for IR comparison |
-| `llc` | LLVM static compiler for assembly comparison |
+| `clang-$LLVM_VERSION` or `$LLVM_BIN/clang` | Compile C → ARM64 bitcode + object files |
+| `llvm-dis-$LLVM_VERSION` or `$LLVM_BIN/llvm-dis` | Disassemble `.bc` → `.ll` for IR comparison |
+| `llc-$LLVM_VERSION` or `$LLVM_BIN/llc` | LLVM static compiler for assembly comparison |
 | `qemu-aarch64` | Run ARM64 test binaries |
 | `qemu-x86_64` | Run recompiled x86_64 test binaries |
 | `gcc-x86-64-linux-gnu` | Cross-linker for x86_64 recompilation on ARM64 hosts |
@@ -46,8 +55,11 @@ On **x86_64 Linux** hosts the `gcc-x86-64-*` packages are unnecessary (native
 linking); `gcc-aarch64-linux-gnu + libc6-dev-arm64-cross` is needed instead
 for the ARM64 compile step.
 
-Checks run automatically before each test session; missing tools produce a
-clear skip message.
+On Linux, set either `LLVM_VERSION` or `LLVM_BIN`; no LLVM tool falls back to
+the unversioned system default. `LLVM_VERSION=20` resolves `clang-20`,
+`llvm-dis-20`, `llc-20`, and related LLVM tools. macOS and Windows retain
+VM-side PATH lookup. Missing end-to-end prerequisites skip only the end-to-end
+cases, so CFG and toolchain unit tests remain runnable.
 
 ## Running tests
 
@@ -93,9 +105,8 @@ Current cases:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARM_LIFTER` | `build/Release/arm-lifter` | Path to arm-lifter binary |
-| `CC` | `clang` | C compiler (resolved via VM PATH; must support `-target`) |
-| `LLVM_DIS` | `llvm-dis` | LLVM disassembler (resolved via VM PATH) |
-| `LLC` | `llc` | LLVM static compiler (resolved via VM PATH) |
+| `LLVM_VERSION` | *(one required on Linux)* | Versioned LLVM command suffix, e.g. `20` |
+| `LLVM_BIN` | *(one required on Linux)* | LLVM `bin` directory containing unversioned tools |
 | `CFLAGS` | `-target aarch64-linux-gnu -fno-sanitize=all -O2` | Compiler flags |
 
 ## Development workflow (`dev.py`)
@@ -335,9 +346,9 @@ through `_vm_prefix()` which prepends the platform-appropriate VM launcher:
 
 | Task | macOS | Linux | Windows |
 |------|-------|-------|---------|
-| `clang ...` | `lima -- clang ...` | `clang ...` | `wsl -- clang ...` |
-| `llvm-dis ...` | `lima -- llvm-dis ...` | `llvm-dis ...` | `wsl -- llvm-dis ...` |
-| `llc ...` | `lima -- llc ...` | `llc ...` | `wsl -- llc ...` |
+| `clang ...` | `lima -- clang ...` | `clang-$LLVM_VERSION` or `$LLVM_BIN/clang ...` | `wsl -- clang ...` |
+| `llvm-dis ...` | `lima -- llvm-dis ...` | `llvm-dis-$LLVM_VERSION` or `$LLVM_BIN/llvm-dis ...` | `wsl -- llvm-dis ...` |
+| `llc ...` | `lima -- llc ...` | `llc-$LLVM_VERSION` or `$LLVM_BIN/llc ...` | `wsl -- llc ...` |
 | `qemu-aarch64 <bin>` | `lima -- qemu-aarch64 <bin>` | `qemu-aarch64 <bin>` | `wsl -- qemu-aarch64 <wsl-path>` |
 | `qemu-x86_64 <bin>` | `lima -- qemu-x86_64 <bin>` | `qemu-x86_64 <bin>` | `wsl -- qemu-x86_64 <wsl-path>` |
 | `arm-lifter` | **Direct (native)** | **Direct (native)** | **Direct (native)** |

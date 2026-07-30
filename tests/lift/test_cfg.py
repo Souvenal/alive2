@@ -1,5 +1,4 @@
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from cfg import (
     run_llvm_mca_for_block,
     select_one_to_one_block_matches,
 )
+from toolchain import ToolchainError, find_host_llvm_tool
 
 
 def test_parse_instruction_map_requires_opcode(
@@ -934,7 +934,10 @@ def test_load_machine_cfg_builds_blocks_edges_and_debug_lines(
 def test_machine_cfg_dump_recovers_aarch64_direct_control_flow(
     tmp_path,
 ) -> None:
-    llvm_mc = shutil.which("llvm-mc")
+    try:
+        llvm_mc = find_host_llvm_tool("llvm-mc")
+    except ToolchainError:
+        llvm_mc = None
     try:
         machine_cfg_dump = cfg.require_machine_cfg_dump()
     except RuntimeError:
@@ -1006,7 +1009,10 @@ foo:
 def test_machine_cfg_dump_keeps_calls_and_marks_indirect_exits(
     tmp_path,
 ) -> None:
-    llvm_mc = shutil.which("llvm-mc")
+    try:
+        llvm_mc = find_host_llvm_tool("llvm-mc")
+    except ToolchainError:
+        llvm_mc = None
     try:
         machine_cfg_dump = cfg.require_machine_cfg_dump()
     except RuntimeError:

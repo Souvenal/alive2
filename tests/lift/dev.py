@@ -27,10 +27,7 @@ from cfg import build_combined_cfg_models, render_interactive_viewer
 from conftest import (
     ARM_LIFTER,
     CASES_DIR,
-    CLANG,
     CFLAGS,
-    LLC,
-    LLVM_DIS,
     _to_vm_path,
     _vm_prefix,
     compile_arm64_binary,
@@ -44,6 +41,7 @@ from conftest import (
     run_x86_64_linux_binary,
 )
 from test_lift import CASE_MARKS
+from toolchain import llvm_tool
 
 
 def _require_arm_lifter() -> None:
@@ -141,7 +139,7 @@ def cmd_full(name: str, outdir: Path) -> None:
 
     # Disassemble .bc → .ll (source IR for comparison)
     src_ll = outdir / f"{name}.ll"
-    r = run_in_vm([LLVM_DIS, str(bc), "-o", str(src_ll)])
+    r = run_in_vm([llvm_tool("llvm-dis"), str(bc), "-o", str(src_ll)])
     if r.returncode != 0:
         print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
         sys.exit(r.returncode)
@@ -149,7 +147,8 @@ def cmd_full(name: str, outdir: Path) -> None:
     # Recompile without debug info → .nodbg.ll
     nodbg_ll = outdir / f"{name}.nodbg.ll"
     r = run_in_vm(
-        [CLANG] + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
+        [llvm_tool("clang")] + CFLAGS + xcflags
+        + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
     )
     if r.returncode != 0:
         print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
@@ -175,7 +174,7 @@ def cmd_full(name: str, outdir: Path) -> None:
         vm_src_ll = _to_vm_path(src_ll_path)
         vm_dst = _to_vm_path(dst)
         r = run_in_vm(
-            [LLC, "-mtriple=aarch64-linux-gnu", "-O2",
+            [llvm_tool("llc"), "-mtriple=aarch64-linux-gnu", "-O2",
              vm_src_ll, "-o", vm_dst]
         )
         if r.returncode != 0:
@@ -206,7 +205,7 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
 
     # Disassemble .bc → .ll (source IR for comparison)
     src_ll = outdir / f"{name}.ll"
-    r = run_in_vm([LLVM_DIS, str(bc), "-o", str(src_ll)])
+    r = run_in_vm([llvm_tool("llvm-dis"), str(bc), "-o", str(src_ll)])
     if r.returncode != 0:
         print(f"llvm-dis failed (exit {r.returncode})", file=sys.stderr)
         sys.exit(r.returncode)
@@ -214,7 +213,8 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
     # Recompile without debug info → .nodbg.ll
     nodbg_ll = outdir / f"{name}.nodbg.ll"
     r = run_in_vm(
-        [CLANG] + CFLAGS + xcflags + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
+        [llvm_tool("clang")] + CFLAGS + xcflags
+        + ["-g0", "-S", "-emit-llvm", vm_src, "-o", str(nodbg_ll)]
     )
     if r.returncode != 0:
         print(f"no-dbg compile failed (exit {r.returncode})", file=sys.stderr)
@@ -240,7 +240,7 @@ def cmd_full_no_cleanup(name: str, outdir: Path) -> None:
         vm_src_ll = _to_vm_path(src_ll_path)
         vm_dst = _to_vm_path(dst)
         r = run_in_vm(
-            [LLC, "-mtriple=aarch64-linux-gnu", "-O2",
+            [llvm_tool("llc"), "-mtriple=aarch64-linux-gnu", "-O2",
              vm_src_ll, "-o", vm_dst]
         )
         if r.returncode != 0:
