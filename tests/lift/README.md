@@ -264,6 +264,42 @@ are not reported across different ISAs because their scheduling models are not
 comparable. A region containing a call measures only the call instruction, not
 the callee.
 
+### Provenance Fragment MCA
+
+```bash
+cd /Users/mac/Projects/alive2/tests/lift
+
+CASE=Maze
+FUNCTION=main
+
+uv run python dev.py full "$CASE"
+
+MACHINE_CFG_DUMP=/Users/mac/Projects/alive2/build/Release/machine-cfg-dump \
+uv run python fragment_mca.py \
+  "output/$CASE.o" \
+  "output/$CASE.lifted.arm64.o" \
+  --asm-map "output/$CASE.asm-map.json" \
+  -f "$FUNCTION" \
+  --report "output/$CASE.fragment-mca.json"
+```
+
+```bash
+cd /Users/mac/Projects/alive2/tests/lift
+
+CASE=Maze
+FUNCTION=main
+
+uv run python dev.py full "$CASE"
+
+MACHINE_CFG_DUMP=/Users/mac/Projects/alive2/build/Release/machine-cfg-dump \
+uv run python fragment_mca.py \
+  "output/$CASE.o" \
+  "output/$CASE.lifted_x86_64" \
+  --asm-map "output/$CASE.asm-map.json" \
+  -f "$FUNCTION" \
+  --report "output/$CASE.fragment-mca-x64.json"
+```
+
 Render the original and lifted CFGs in one image:
 
 ```bash

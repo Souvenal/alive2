@@ -16,5 +16,7 @@ commands_*.txt
 .cache
 .venv
 
+.DS_Store
+
 !.agents/skills/build/
 !.agents/skills/build/**
