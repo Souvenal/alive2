@@ -1,10 +1,11 @@
-import glob
 import os
 import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path
+
+from toolchain import ToolchainError, check_linux_llvm_version, llvm_tool
 
 # --- Paths ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -48,30 +49,6 @@ def _to_vm_path(p: Path) -> str:
 ARM_LIFTER = os.environ.get(
     "ARM_LIFTER", str(PROJECT_ROOT / "build/Release/arm-lifter")
 )
-
-# Everything else (compilation, disassembly, QEMU) runs inside a Linux VM
-# where clang and the rest of the LLVM toolchain are installed natively.
-# Strip directory components — commands resolve through the VM's own PATH.
-CLANG = os.path.basename(os.environ.get("CC", "clang"))
-# Linux: os.environ.get("CC", "clang-20")
-LLVM_DIS = os.path.basename(os.environ.get("LLVM_DIS", "llvm-dis"))
-# Linux: os.environ.get("LLVM_DIS", "llvm-dis-20")
-LLC = os.path.basename(os.environ.get("LLC", "llc"))
-# Linux: os.environ.get("LLC", "llc-20")
-
-# # Linux gcc-cross toolchain auto-detection (uncomment on Linux)
-# # gcc_cross_dirs = sorted(glob.glob('/usr/lib/gcc-cross/aarch64-linux-gnu/*/'))
-# # gcc_cross_path = gcc_cross_dirs[-1] if gcc_cross_dirs else "/usr/lib/gcc-cross/aarch64-linux-gnu/11/"
-# # CFLAGS = [
-# #     "-target", "aarch64-linux-gnu",
-# #     "-fuse-ld=/usr/bin/ld.lld-20",
-# #     "-B", gcc_cross_path,
-# #     "-L", gcc_cross_path,
-# #     "-I", "/usr/aarch64-linux-gnu/include",
-# #     "-L", "/usr/aarch64-linux-gnu/lib",
-# #     "-fno-sanitize=all",
-# #     "-O2"
-# # ]
 
 CFLAGS = os.environ.get(
     "CFLAGS", "-target aarch64-linux-gnu -fno-sanitize=all -O2"
@@ -190,7 +167,7 @@ def compile_bc_and_o(
     vm_bc = _to_vm_path(bc)
     vm_o = _to_vm_path(o)
 
-    cmd = [CLANG] + CFLAGS + (extra_cflags or [])
+    cmd = [llvm_tool("clang")] + CFLAGS + (extra_cflags or [])
 
     r = run_in_vm(cmd + ["-emit-llvm", "-c", vm_src, "-o", vm_bc])
     if r.returncode != 0:
@@ -231,7 +208,7 @@ def compile_arm64_binary(
     vm_output = _to_vm_path(output)
 
     r = run_in_vm(
-        [CLANG] + CFLAGS + (extra_cflags or [])
+        [llvm_tool("clang")] + CFLAGS + (extra_cflags or [])
         + ["-static", vm_src, "-o", vm_output]
     )
     if r.returncode != 0:
@@ -251,7 +228,7 @@ def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
     vm_output = _to_vm_path(output)
 
     r = run_in_vm(
-        [CLANG, "-target", "x86_64-linux-gnu", "-g", "-c",
+        [llvm_tool("clang"), "-target", "x86_64-linux-gnu", "-g", "-c",
          vm_ll, "-o", vm_o]
     )
     if r.returncode != 0:
@@ -260,7 +237,7 @@ def recompile_x86_64(ll_path: Path, workdir: Path) -> Path:
         )
 
     r = run_in_vm(
-        [CLANG, "-target", "x86_64-linux-gnu", "-static",
+        [llvm_tool("clang"), "-target", "x86_64-linux-gnu", "-static",
          vm_o, "-o", vm_output, "-lm"]
     )
     if r.returncode != 0:
@@ -280,7 +257,7 @@ def recompile_arm64(ll_path: Path, workdir: Path) -> Path:
     vm_output = _to_vm_path(output)
 
     r = run_in_vm(
-        [CLANG, "-target", "aarch64-linux-gnu", "-g", "-c",
+        [llvm_tool("clang"), "-target", "aarch64-linux-gnu", "-g", "-c",
          vm_ll, "-o", vm_o]
     )
     if r.returncode != 0:
@@ -289,7 +266,7 @@ def recompile_arm64(ll_path: Path, workdir: Path) -> Path:
         )
 
     r = run_in_vm(
-        [CLANG, "-target", "aarch64-linux-gnu", "-static",
+        [llvm_tool("clang"), "-target", "aarch64-linux-gnu", "-static",
          vm_o, "-o", vm_output, "-lm"]
     )
     if r.returncode != 0:
@@ -340,13 +317,26 @@ def check_prerequisites() -> list[str]:
             reasons.append("wsl not found (install WSL)")
             return reasons  # cannot check further
 
-    # Tools that must be available inside the Linux VM
-    vm_tools = [CLANG, LLVM_DIS, LLC, "qemu-aarch64", "qemu-x86_64"]
-    for tool in vm_tools:
+    llvm_ready = True
+    for tool in ("clang", "llvm-dis", "llc"):
+        try:
+            llvm_tool(tool)
+        except ToolchainError as error:
+            if str(error) not in reasons:
+                reasons.append(str(error))
+            llvm_ready = False
+    if llvm_ready:
+        try:
+            check_linux_llvm_version()
+        except ToolchainError as error:
+            reasons.append(str(error))
+
+    # QEMU is not part of LLVM and remains VM/PATH-resolved.
+    for tool in ("qemu-aarch64", "qemu-x86_64"):
         if not _check_tool_in_vm(tool):
             reasons.append(
                 f"{tool} not found in Linux VM "
-                "(install: sudo apt install clang llvm qemu-user)"
+                "(install: sudo apt install qemu-user)"
             )
 
     return reasons
@@ -372,9 +362,12 @@ else:
         """Check prerequisites once at session start."""
         config._arm_lifter_skip_reasons = check_prerequisites()
 
-    def pytest_sessionstart(session):
-        """Abort with a clear message if prerequisites are not met."""
-        reasons = getattr(session.config, "_arm_lifter_skip_reasons", [])
-        if reasons:
-            msg = "; ".join(reasons)
-            pytest.exit(f"\n!!! {msg}\n")
+    def pytest_collection_modifyitems(config, items):
+        """Skip only end-to-end tests when their prerequisites are absent."""
+        reasons = getattr(config, "_arm_lifter_skip_reasons", [])
+        if not reasons:
+            return
+        marker = pytest.mark.skip(reason="; ".join(reasons))
+        for item in items:
+            if item.path.name == "test_lift.py":
+                item.add_marker(marker)

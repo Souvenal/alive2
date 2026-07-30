@@ -28,11 +28,18 @@ import tempfile
 from pathlib import Path
 
 from asm_diff import parse_instruction_map
+from toolchain import ToolchainError, find_host_llvm_tool
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def require_tool(name: str) -> str:
+    if name in {"llvm-mc", "llvm-mca", "llvm-objdump", "opt"}:
+        try:
+            return find_host_llvm_tool(name)
+        except ToolchainError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
     path = shutil.which(name)
     if not path:
         print(f"Error: '{name}' not found in PATH", file=sys.stderr)
