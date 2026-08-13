@@ -1,192 +1,322 @@
-Alive2 — arm-lifter fork
-=======================
+# Alive2 arm-lifter fork
 
-This is a fork of the [arm-tv branch](https://github.com/regehr/alive2/tree/arm-tv) of Alive2, extended with **arm-lifter** — a tool that lifts ARM64 (AArch64) machine code from ELF object files into semantically faithful LLVM IR.
+This fork focuses on lifting AArch64 machine code to LLVM IR and measuring the
+code generated from that lifted IR. The current workflow has two primary
+components:
 
-### What arm-lifter does
+1. **`arm-lifter`**: lifts an AArch64 ELF object file into LLVM IR.
+2. **`scripts/lift_fragment_mca.py`**: accepts a C source file, drives the
+   complete compile/lift/recompile pipeline, and produces per-fragment
+   `llvm-mca` comparison reports.
 
-```
-C source ──→ ELF .o + .bc ──→ arm-lifter ──→ LLVM IR (.ll) ──→ recompile to any target
-```
+For normal development and corpus testing, build `arm-lifter` once and invoke
+the script with a `.c` file. The script creates all intermediate files and
+reports automatically.
 
-arm-lifter reads an AArch64 ELF `.o` file and a matching `.bc` (or `.ll`) bitcode file, disassembles the object's `.text` section, symbolizes data/BSS sections, and translates every ARM instruction into LLVM IR. All functions in the object are lifted into a single shared `Module` — cross-function calls resolve directly, and global variables retain their full types and initializers from the bitcode.
+## Prerequisites
 
-The lifted IR can be recompiled to any LLVM-supported target (AArch64, x86_64, etc.) for cross-architecture binary translation or backend comparison.
-
-### Quick Start
-
-#### Step 0: Build local LLVM
-
-arm-lifter requires a local LLVM build with RTTI enabled. Tested with the `release/22.x` branch.
+`arm-lifter` requires a local LLVM build with RTTI enabled. The project is
+tested with LLVM `release/22.x`, normally cloned as the sibling directory
+`../llvm-project`.
 
 ```bash
-# Clone LLVM as a sibling directory
-cd /path/to/alive2
-git clone --branch release/22.x --depth 1 https://github.com/llvm/llvm-project.git
+cd /path/to
+git clone --branch release/22.x --depth 1 \
+  https://github.com/llvm/llvm-project.git
 
-# Configure & build
 cd llvm-project
 cmake -B build -S llvm -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RTTI=ON \
   -DBUILD_SHARED_LIBS=ON \
   -DLLVM_ENABLE_ASSERTIONS=ON \
-  -DLLVM_ENABLE_PROJECTS="llvm"
+  -DLLVM_ENABLE_PROJECTS=llvm
 cmake --build build
 ```
 
-> If LLVM is cloned elsewhere, set `LOCAL_LLVM` before building:
-> ```bash
-> export LOCAL_LLVM=/path/to/your/llvm-project
-> ```
+If LLVM is elsewhere, set `LOCAL_LLVM` to the LLVM project directory before
+building this repository.
 
-#### Step 1: Build arm-lifter
+The analysis pipeline also requires:
+
+- Python 3.11+ and `uv`
+- `clang`, `llvm-dis`, and `llc`
+- `qemu-aarch64` and `qemu-x86_64`
+- Lima on macOS, or WSL on Windows
+
+See [docs/usage.md](docs/usage.md) for detailed platform setup.
+
+## Main Workflow
+
+### 1. Build the lifter
+
+From the repository root:
 
 ```bash
 ./build.sh
 ```
 
-#### Step 2: Lift a single file
+This builds:
 
-Compile your C source to both `.o` and `.bc` (or `.ll`), then run arm-lifter:
+```text
+build/Release/arm-lifter
+build/Release/machine-cfg-dump
+```
+
+`arm-lifter` runs natively on the host. The script dispatches cross-platform
+compilation and binary analysis through the test infrastructure.
+
+### 2. Analyze a C file
+
+Pass the source file directly to the script:
 
 ```bash
-# Inside a Linux VM (or natively on Linux):
-clang -target aarch64-linux-gnu -O2 -c foo.c -o foo.o
-clang -target aarch64-linux-gnu -O2 -S -emit-llvm foo.c -o foo.bc
-
-# On the host (arm-lifter runs natively):
-build/Release/arm-lifter foo.o --src-bc=foo.bc -o foo.lifted.ll
+uv run scripts/lift_fragment_mca.py tests/lift/cases/Maze.c
 ```
 
-#### Step 3: Batch-lift a whole project
+The script performs the complete workflow:
 
-For multi-file projects, use `lift_compile_commands.py` to drive arm-lifter from a `compile_commands.json`:
+```text
+C source
+  -> AArch64 .o and LLVM bitcode
+  -> arm-lifter
+  -> lifted LLVM IR
+  -> AArch64 and x86_64 recompilation
+  -> provenance fragment extraction
+  -> llvm-mca analysis
+  -> JSON reports and improved summary
+```
+
+By default, output is written under `./output`. Use `-o` to select another
+output root:
 
 ```bash
-python3 scripts/lift_compile_commands.py /path/to/compile_commands.json \
-    --arm-lifter=build/Release/arm-lifter
+uv run scripts/lift_fragment_mca.py input.c -o /path/to/results
 ```
 
-> **Important**: The target project **must** be compiled with `CC=clang`. The script validates this on startup and aborts if non-clang entries are found. See [docs/usage.md](docs/usage.md) for details.
-
-#### Try it: batch-lift the bundled example project
-
-The repository includes [`example_project/`](example_project/), a multi-file C project ready for testing:
+Use `--function` when only one mapped function is relevant:
 
 ```bash
-# Build the example project (native ARM64, inside Linux VM)
-cd example_project
-cmake -S . -B build -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-
-# Batch-lift all 3 translation units
-cd /path/to/alive2
-python3 scripts/lift_compile_commands.py example_project/build/compile_commands.json \
-    --arm-lifter=build/Release/arm-lifter \
-    --link-output=example_project/example_lifted
+uv run scripts/lift_fragment_mca.py input.c --function main
 ```
 
-Expected output:
-```
-Loaded 3 entries from example_project/build/compile_commands.json
-Lifting 3 function(s) from main.o
-...
-Lifting 2 function(s) from calc.o
-...
-Lifting 1 function(s) from util.o
-...
-Done. 3/3 succeeded.
-```
+## Corpus Testing
 
-**Note**: The lifted binary currently crashes (SIGSEGV) due to register-alloca
-modeling issues — see Known Limitations below and issue 21. The pipeline itself
-succeeds: all 3 TU's lift to valid IR without errors.
-
-### CLI Reference
-
-```
-arm-lifter <input.o> --src-bc=<input.bc> [options]
-```
-
-| Option | Description |
-|--------|-------------|
-| `<input.o>` | Input AArch64 ELF `.o` file (positional, required) |
-| `--src-bc=<file>` | LLVM bitcode (`.bc`) or textual IR (`.ll`) with function signatures and extern declarations (required) |
-| `-o / --output-file=<file>` | Output file path for lifted LLVM IR (default: `<input_basename>.lifted.ll`) |
-| `--run-replace-ptrtoint` | Replace `ptr→int→ptr` round trips with single GEP (default: `true`) |
-| `--run-cleanup` | Run cleanup passes: mem2reg, dce, simplifycfg, globaldce (default: `true`) |
-| `--show-asm` | Print the generated re-assemblable assembly to stdout for debugging (default: `false`) |
-
-**About `--src-bc`**: The lifter needs precise function signatures (parameter types, return type) to produce correct LLVM IR. These are provided via a `.bc`/`.ll` file compiled from the same source alongside the `.o` file. The bitcode also supplies extern global variable types and initializers. Both bitcode and textual IR formats are accepted (textual IR avoids cross-version BC format mismatches).
-
-**Output**: A single `.ll` file containing all functions from the input object lifted into one LLVM `Module`, along with all imported global variables.
-
-### Testing
-
-End-to-end testing lives in `tests/lift/` and uses pytest + the `dev.py` development tool. See [tests/lift/README.md](tests/lift/README.md) for the complete workflow.
+Markdown is disabled by default. This is the intended mode for running many C
+files because JSON is smaller and the summary file is sufficient for locating
+interesting cases.
 
 ```bash
-# Run the full test suite (from tests/lift/)
-cd tests/lift && uv run pytest -v
-
-# Lift a single case and inspect the output
-cd tests/lift && uv run python dev.py lift minirepro
-
-# Full pipeline: lift + recompile + assembly comparison
-cd tests/lift && uv run python dev.py full minirepro
+for source in tests/lift/cases/*.c; do
+  uv run scripts/lift_fragment_mca.py "$source"
+done
 ```
 
-### Architecture
+Each input produces `output/report/<name>.improved-summary.txt`. Check these
+files first. A result with no improvements contains:
 
-```
-┌──────────────────────────────────┐
-│          Tools Layer             │
-│         arm-lifter               │
-└──────────┬───────────────────────┘
-           │
-┌──────────▼──────────┐  ┌────────────────────┐
-│    lifter_util/     │  │    backend_tv/      │
-│  ELF → assembly     │  │  ARM instruction    │
-│  Shared Module mgmt │  │  → LLVM IR engine   │
-│  Cleanup passes     │  │  (arm2llvm, mc2llvm)│
-│  Compiler-rt ABI    │  └─────────┬───────────┘
-└─────────────────────┘            │
-                          ┌────────▼──────────┐
-                          │   Alive2 core     │
-                          │   (ir/smt/tv)     │
-                          └───────────────────┘
+```text
+Improved fragments
+==================
+
+No improved fragments found.
 ```
 
-### Key Files
+When improvements exist, the summary lists only the affected function,
+architecture, and fragment IDs:
 
-| File | Role |
-|------|------|
-| `tools/arm-lifter.cpp` | CLI entry point, orchestrates the pipeline |
-| `lifter_util/obj2asm.h/cpp` | ELF → re-assemblable GAS assembly |
-| `lifter_util/binary_reader.h/cpp` | ELF reading, symbol map construction |
-| `lifter_util/object_lift_context.h/cpp` | Shared Module ownership, global variable lookup |
-| `lifter_util/codegen_runtime_abi.h/cpp` | Compiler-rt symbol ABI table |
-| `lifter_util/lifter_cleanup.h/cpp` | Post-lift cleanup passes (mem2reg, dce, etc.) |
-| `backend_tv/lifter.h/cpp` | `liftFuncToModule()` — assembly → LLVM IR |
-| `backend_tv/arm2llvm.h/cpp` + `arm2llvm_*.cpp` | ARM MC instruction → LLVM IR translation |
-| `backend_tv/mc2llvm.h/cpp` | MC → LLVM IR core engine |
-| `scripts/lift_compile_commands.py` | Batch lifting from `compile_commands.json` |
-| `example_project/` | Ready-to-run multi-file C project for testing batch lifting |
+```text
+Improved fragments
+==================
 
-### Known Limitations
+main ARM64 improved:
+  - fragment_3
+  - fragment_7
+```
 
-- **Register-alloca modeling (issue 21)**: The lifter models all ARM registers as stack `alloca` slots, producing bloated IR with `freeze poison → zext → shl → or → trunc` round-trips for every parameter. Multi-function programs with printf may crash (SIGSEGV). Single functions and simple arithmetic work correctly.
-- **ELF format only**: Mach-O and PE are not supported.
-- **Variadic functions**: partially supported; complex `printf` patterns may still fail (see issue 26).
-- **ADRP relocation**: basic ADRP+LDR pairs are handled; complex GOT patterns may need further work (issue 02).
-- **Alive2/Z3 linkage**: arm-lifter still links against the Alive2/Z3 dependency chain. Decoupling is tracked in issue 06.
-- **Non-.text executable sections**: only `.text` is disassembled; PGO-partitioned sections (`.text.hot`, `.text.cold`) are not yet handled (issue 08).
+After finding an interesting source file, rerun that file with `--write-md` to
+generate human-readable reports for manual inspection:
 
-Full architectural details and code ownership policy: [AGENTS.md](AGENTS.md).
-Detailed usage guide: [docs/usage.md](docs/usage.md).
-Feature completeness evaluation: [docs/feature-completeness.md](docs/feature-completeness.md).
+```bash
+uv run scripts/lift_fragment_mca.py path/to/interesting.c --write-md
+```
 
----
+The script replaces reports for the same source basename. Inputs processed into
+one output directory should therefore have unique basenames.
 
-For upstream Alive2 documentation (alive-tv, Clang plugin, caching, etc.), see the [original Alive2 README](https://github.com/AliveToolkit/alive2/blob/master/README.md) and the [arm-tv branch](https://github.com/regehr/alive2/tree/arm-tv).
+## Output Directory
+
+The output root is split into build artifacts and reports:
+
+```text
+output/
+├── build/
+│   ├── <name>.bc
+│   ├── <name>.o
+│   ├── <name>.ll
+│   ├── <name>.nodbg.ll
+│   ├── <name>.lifted.ll
+│   ├── <name>.asm-map.json
+│   ├── <name>.lift.log
+│   ├── <name>.nodbg.s
+│   ├── <name>.lifted.s
+│   ├── <name>.lifted.arm64.o
+│   ├── <name>.lifted_x86_64
+│   └── other compiled objects and binaries
+└── report/
+    ├── <name>.improved-summary.txt
+    ├── <name>.<function>.fragment-mca.json
+    ├── <name>.<function>.fragment-mca-arm-improved.json
+    ├── <name>.<function>.fragment-mca-x64.json
+    ├── <name>.<function>.fragment-mca-x64-improved.json
+    └── matching .md files when --write-md is used
+```
+
+### `output/build`
+
+This directory contains intermediate and diagnostic artifacts:
+
+| File | Purpose |
+|---|---|
+| `<name>.o` / `<name>.bc` | Original source compiled for the lifter |
+| `<name>.lifted.ll` | LLVM IR produced by `arm-lifter` |
+| `<name>.asm-map.json` | Machine-instruction provenance emitted by the lifter |
+| `<name>.lift.log` | Full `arm-lifter` stdout and stderr |
+| `<name>.nodbg.ll` | Source LLVM IR without debug metadata |
+| `<name>.nodbg.s` / `<name>.lifted.s` | Original and lifted AArch64 assembly |
+| `<name>.lifted.arm64.o` | Lifted IR recompiled to AArch64 for same-ISA MCA |
+| `<name>.lifted_x86_64` | Lifted IR recompiled to x86_64 |
+
+Use these files when debugging lifting, provenance, compilation, or report
+generation. They are not the first place to look during corpus triage.
+
+### `output/report`
+
+Read report output in this order:
+
+1. **`<name>.improved-summary.txt`**
+   - The primary corpus-triage file.
+   - Lists only functions and fragments whose target
+     `cycles_per_iteration` is lower than the source.
+   - Explicitly says when no improved fragment was found.
+
+2. **`fragment-mca-arm-improved.json`**
+   - Contains only improved AArch64-to-AArch64 fragments.
+   - This is the reliable same-ISA comparison.
+   - For each fragment, compare
+     `mca.source.cycles_per_iteration` with
+     `mca.target.cycles_per_iteration`.
+
+3. **`fragment-mca-x64-improved.json`**
+   - Contains fragments where the reported x86_64 target cycle count is lower.
+   - The source is AArch64 and the target is x86_64, so the report is marked
+     `cross_isa`.
+   - Treat this as a candidate-finding heuristic, not a direct performance
+     claim across architectures.
+
+4. **Full `fragment-mca*.json` reports**
+   - `fragment-mca.json` is the full AArch64 same-ISA report.
+   - `fragment-mca-x64.json` is the full AArch64-to-x86_64 report.
+   - These include accepted fragments plus rejected or excluded provenance
+     records and are useful when investigating why a fragment was not selected.
+
+5. **Optional Markdown reports**
+   - Generated only with `--write-md`.
+   - Include summary tables, instruction listings, cycle values, throughput,
+     uOps, ratios, and rejection details.
+   - Intended for manual inspection after the TXT summary identifies an
+     interesting file.
+
+An improved JSON report contains only accepted fragments satisfying:
+
+```text
+target.cycles_per_iteration < source.cycles_per_iteration
+```
+
+Equal cycles, regressions, rejected fragments, excluded fragments, missing MCA
+results, and MCA errors are omitted.
+
+## Script Options
+
+```text
+lift_fragment_mca.py <source.c> [options]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `<source.c>` | required | C source file to compile, lift, and analyze |
+| `-o`, `--output-dir` | `./output` | Output root containing `build/` and `report/` |
+| `--function` | all mapped functions | Analyze one function only |
+| `--write-md` | off | Also generate Markdown reports |
+| `--arm-lifter` | configured test path | Override the `arm-lifter` binary |
+| `--machine-cfg-dump` | environment/default | Override `machine-cfg-dump` |
+| `--mcpu` | `generic` | `llvm-mca` CPU model |
+| `--mattr` | empty | `llvm-mca` target attributes |
+| `--mca-iterations` | `100` | Number of MCA iterations |
+| `--min-source-instructions` | `2` | Minimum source instructions per fragment |
+| `--min-target-instructions` | `2` | Minimum target instructions per fragment |
+
+## The Two Core Components
+
+### `arm-lifter`
+
+The native C++ tool reads an AArch64 ELF object and matching LLVM bitcode or
+textual IR:
+
+```text
+arm-lifter <input.o> --src-bc=<input.bc-or-ll> -o <output.ll>
+```
+
+It disassembles executable code, symbolizes data and BSS sections, lifts ARM
+instructions into LLVM IR, resolves functions and globals through the source
+module, and writes all lifted functions into one LLVM module.
+
+The direct CLI remains useful for lifter debugging, but normal comparison work
+should use `scripts/lift_fragment_mca.py` so compilation, provenance collection,
+recompilation, and MCA reporting stay consistent.
+
+### `scripts/lift_fragment_mca.py`
+
+This is the main comparison entry point. It owns the end-to-end experiment:
+
+- compiles the source for AArch64;
+- invokes the native `arm-lifter`;
+- recompiles lifted IR for AArch64 and x86_64;
+- correlates source and target instructions using the lifter's assembly map;
+- runs `llvm-mca` on strict provenance fragments;
+- writes full and improved JSON reports;
+- writes one TXT summary for fast triage;
+- optionally writes Markdown for manual review.
+
+## Testing
+
+The focused script and fragment-report tests are:
+
+```bash
+cd tests/lift
+uv run pytest -v test_lift_fragment_mca_script.py test_fragment_mca.py
+```
+
+The complete arm-lifter test suite is:
+
+```bash
+cd tests/lift
+uv run pytest -v
+```
+
+See [tests/lift/README.md](tests/lift/README.md) for the full testing guide.
+
+## Project Layout
+
+| Path | Role |
+|---|---|
+| `tools/arm-lifter.cpp` | Native lifter CLI |
+| `lifter_util/` | ELF reading, symbolization, shared-module management, cleanup |
+| `backend_tv/` | AArch64 instruction-to-LLVM lifting engine |
+| `scripts/lift_fragment_mca.py` | Main single-source comparison workflow |
+| `tests/lift/fragment_mca.py` | Provenance fragment construction and MCA reports |
+| `tests/lift/` | End-to-end tests and cross-platform tool dispatch |
+
+Architecture and ownership rules are documented in [AGENTS.md](AGENTS.md).
+Detailed direct-lifter and legacy project workflows are in
+[docs/usage.md](docs/usage.md).
