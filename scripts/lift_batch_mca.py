@@ -54,6 +54,7 @@ from lift_fragment_mca import run_pipeline as _run_pipeline
 from lift_fragment_mca import _check_source, _output_dirs, _require_vm_shared_path
 
 # Import from conftest.py
+import conftest as _conftest
 from conftest import (
     ARM_LIFTER,
     CFLAGS,
@@ -68,6 +69,9 @@ from conftest import (
     run_command,
     run_in_vm,
 )
+
+# Import lift_fragment_mca module reference (for CFLAGS monkey-patching)
+import lift_fragment_mca as _lfm
 
 
 # Platform detection
@@ -190,6 +194,61 @@ def extract_user_flags(entry: Dict[str, Any]) -> List[str]:
                 pass
         elif a.startswith("-I") or a.startswith("-D") or a.startswith("-O"):
             out.append(a)
+    return out
+
+
+def extract_entry_cflags(entry: Dict[str, Any]) -> List[str]:
+    """Extract compilation flags from a compile_commands entry.
+
+    Returns flags that affect compilation output (include paths, defines,
+    optimization, warnings, standards, etc.) but strips the compiler name,
+    source file, -o, -c, and -emit-llvm which are handled separately.
+    """
+    args = get_args(entry)
+    if is_cc1_entry(entry):
+        return extract_user_flags(entry)
+
+    # Driver entry: skip compiler (args[0]) and collect everything before
+    # the source file, excluding -c, -o (with value), and the source/output.
+    src_file = entry.get("file", "")
+    src_basename = os.path.basename(src_file) if src_file else ""
+    output = entry.get("output")
+    if not output:
+        for i, a in enumerate(args):
+            if a == "-o" and i + 1 < len(args):
+                output = args[i + 1]
+                break
+            if a.startswith("-o") and len(a) > 2:
+                output = a[2:]
+                break
+    output_basename = os.path.basename(output) if output else ""
+
+    out: List[str] = []
+    i = 1  # skip compiler
+    while i < len(args):
+        a = args[i]
+        if a == "-c":
+            i += 1
+            continue
+        if a == "-o":
+            i += 2  # skip -o and its value
+            continue
+        if a.startswith("-o") and len(a) > 2:
+            i += 1
+            continue
+        if a == "-emit-llvm" or a == "-S":
+            i += 1
+            continue
+        # Skip the source file argument
+        if src_basename and os.path.basename(a) == src_basename:
+            i += 1
+            continue
+        # Skip the output file argument
+        if output_basename and os.path.basename(a) == output_basename:
+            i += 1
+            continue
+        out.append(a)
+        i += 1
     return out
 
 
@@ -335,21 +394,35 @@ def process_entry(
             entry["command"] = " ".join(shlex.quote(a) for a in orig)
     
     try:
-        # Use the run_pipeline function from lift_fragment_mca.py
-        reports = _run_pipeline(
-            source=source_path,
-            output_dir=source_output_dir,
-            arm_lifter=arm_lifter_path,
-            machine_cfg_dump=None,  # Will be auto-detected
-            mcpu=args.mcpu,
-            mattr=args.mattr,
-            iterations=args.mca_iterations,
-            min_source_instructions=args.min_source_instructions,
-            min_target_instructions=args.min_target_instructions,
-            function=args.function,
-            write_md=args.write_md,
-        )
-        
+        # Extract per-entry compiler flags (-I, -D, -O, etc.) and inject
+        # them into the CFLAGS used by _run_pipeline().  Without this,
+        # project-specific include paths and defines are lost.
+        entry_cflags = extract_entry_cflags(entry)
+        merged_cflags = CFLAGS + entry_cflags
+
+        saved_conftest_cflags = _conftest.CFLAGS
+        saved_lfm_cflags = _lfm.CFLAGS
+        try:
+            _conftest.CFLAGS = merged_cflags
+            _lfm.CFLAGS = merged_cflags
+
+            reports = _run_pipeline(
+                source=source_path,
+                output_dir=source_output_dir,
+                arm_lifter=arm_lifter_path,
+                machine_cfg_dump=None,
+                mcpu=args.mcpu,
+                mattr=args.mattr,
+                iterations=args.mca_iterations,
+                min_source_instructions=args.min_source_instructions,
+                min_target_instructions=args.min_target_instructions,
+                function=args.function,
+                write_md=args.write_md,
+            )
+        finally:
+            _conftest.CFLAGS = saved_conftest_cflags
+            _lfm.CFLAGS = saved_lfm_cflags
+
         print(f"  OK → {source_output_dir}")
         return source_stem, build_dir, report_dir, source_path
         

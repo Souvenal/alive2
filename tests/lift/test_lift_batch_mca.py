@@ -214,6 +214,55 @@ class TestMain:
         assert exc_info.value.code == 1
 
 
+class TestExtractEntryCflags:
+    """Test extract_entry_cflags."""
+    
+    def test_driver_entry_with_flags(self):
+        """Test extracting flags from a driver entry."""
+        entry = {
+            "file": "/src/test.c",
+            "output": "test.o",
+            "arguments": [
+                "clang", "-target", "aarch64-linux-gnu", "-O2",
+                "-I/usr/include", "-DFOO=1", "-Wall",
+                "-c", "/src/test.c", "-o", "test.o",
+            ],
+        }
+        result = tool.extract_entry_cflags(entry)
+        assert "-I/usr/include" in result
+        assert "-DFOO=1" in result
+        assert "-Wall" in result
+        # These should be stripped
+        assert "clang" not in result
+        assert "-c" not in result
+        assert "-o" not in result
+        assert "test.o" not in result
+        assert "/src/test.c" not in result
+    
+    def test_cc1_entry(self):
+        """Test extracting flags from a -cc1 entry."""
+        entry = {
+            "file": "/src/test.c",
+            "arguments": [
+                "clang", "-cc1", "-I/usr/include", "-DFOO=1", "-O2",
+                "/src/test.c",
+            ],
+        }
+        result = tool.extract_entry_cflags(entry)
+        assert "-I/usr/include" in result
+        assert "-DFOO=1" in result
+        assert "-O2" in result
+    
+    def test_minimal_entry(self):
+        """Test extracting flags from a minimal entry."""
+        entry = {
+            "file": "test.c",
+            "arguments": ["clang", "-c", "test.c", "-o", "test.o"],
+        }
+        result = tool.extract_entry_cflags(entry)
+        assert result == []
+
+
 class TestIsCc1Entry:
     """Test is_cc1_entry."""
     
