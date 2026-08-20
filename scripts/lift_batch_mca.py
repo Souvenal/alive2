@@ -271,6 +271,37 @@ def _recompile_x86_64_obj(ll_path: Path, workdir: Path) -> Path:
     return o_path
 
 
+def _recompile_arm64_obj(ll_path: Path, workdir: Path) -> Path:
+    """Recompile lifted .ll to an AArch64 .o object (no linking)."""
+    o_path = workdir / f"{ll_path.stem}.arm64.o"
+    vm_ll = _to_vm_path(ll_path)
+    vm_o = _to_vm_path(o_path)
+    r = run_in_vm(
+        [CLANG, "-target", "aarch64-linux-gnu", "-g", "-c", vm_ll, "-o", vm_o]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to compile aarch64 .o from {ll_path.name}:\n{r.stderr}\n{r.stdout}"
+        )
+    return o_path
+
+
+def _compile_arm64_obj(src: Path, workdir: Path, extra_cflags: List[str] | None = None) -> Path:
+    """Compile src to an AArch64 .o object (no linking)."""
+    output = workdir / f"{src.stem}.o"
+    vm_src = _to_vm_path(src)
+    vm_output = _to_vm_path(output)
+    r = run_in_vm(
+        [CLANG] + CFLAGS + (extra_cflags or [])
+        + ["-c", vm_src, "-o", vm_output]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to compile ARM64 object for {src.name}:\n{r.stderr}\n{r.stdout}"
+        )
+    return output
+
+
 def validate_clang_compiler(db: List[Dict[str, Any]]) -> bool:
     """Validate that all compile_commands entries use clang."""
     non_clang = []
@@ -427,13 +458,17 @@ def process_entry(
 
             saved_conftest_cflags = _conftest.CFLAGS
             saved_lfm_cflags = _lfm.CFLAGS
-            # Skip x86_64 linking — MCA only needs .o, and library TUs
+            # Skip linking — MCA only needs .o, and library TUs
             # (no main) fail at link time.
-            saved_recompile = _lfm.recompile_x86_64
+            saved_recompile_x86 = _lfm.recompile_x86_64
+            saved_recompile_arm = _lfm.recompile_arm64
+            saved_compile_arm = _lfm.compile_arm64_binary
             try:
                 _conftest.CFLAGS = merged_cflags
                 _lfm.CFLAGS = merged_cflags
                 _lfm.recompile_x86_64 = _recompile_x86_64_obj
+                _lfm.recompile_arm64 = _recompile_arm64_obj
+                _lfm.compile_arm64_binary = _compile_arm64_obj
 
                 print(f"  cwd: {directory}")
                 print(f"  CFLAGS: {' '.join(merged_cflags)}")
@@ -454,7 +489,9 @@ def process_entry(
             finally:
                 _conftest.CFLAGS = saved_conftest_cflags
                 _lfm.CFLAGS = saved_lfm_cflags
-                _lfm.recompile_x86_64 = saved_recompile
+                _lfm.recompile_x86_64 = saved_recompile_x86
+                _lfm.recompile_arm64 = saved_recompile_arm
+                _lfm.compile_arm64_binary = saved_compile_arm
         finally:
             os.chdir(saved_cwd)
 
