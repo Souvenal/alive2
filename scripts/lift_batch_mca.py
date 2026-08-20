@@ -252,6 +252,25 @@ def extract_entry_cflags(entry: Dict[str, Any]) -> List[str]:
         out.append(a)
         i += 1
     return out
+def _recompile_x86_64_obj(ll_path: Path, workdir: Path) -> Path:
+    """Recompile lifted .ll to an x86_64 .o object (no linking).
+
+    MCA analysis only needs the object file.  Linking fails for translation
+    units without a main() symbol (e.g. library sources in large projects).
+    """
+    o_path = workdir / f"{ll_path.stem}.o"
+    vm_ll = _to_vm_path(ll_path)
+    vm_o = _to_vm_path(o_path)
+    r = run_in_vm(
+        [CLANG, "-target", "x86_64-linux-gnu", "-g", "-c", vm_ll, "-o", vm_o]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to compile x86_64 .o from {ll_path.name}:\n{r.stderr}\n{r.stdout}"
+        )
+    return o_path
+
+
 def validate_clang_compiler(db: List[Dict[str, Any]]) -> bool:
     """Validate that all compile_commands entries use clang."""
     non_clang = []
@@ -408,9 +427,13 @@ def process_entry(
 
             saved_conftest_cflags = _conftest.CFLAGS
             saved_lfm_cflags = _lfm.CFLAGS
+            # Skip x86_64 linking — MCA only needs .o, and library TUs
+            # (no main) fail at link time.
+            saved_recompile = _lfm.recompile_x86_64
             try:
                 _conftest.CFLAGS = merged_cflags
                 _lfm.CFLAGS = merged_cflags
+                _lfm.recompile_x86_64 = _recompile_x86_64_obj
 
                 print(f"  cwd: {directory}")
                 print(f"  CFLAGS: {' '.join(merged_cflags)}")
@@ -431,6 +454,7 @@ def process_entry(
             finally:
                 _conftest.CFLAGS = saved_conftest_cflags
                 _lfm.CFLAGS = saved_lfm_cflags
+                _lfm.recompile_x86_64 = saved_recompile
         finally:
             os.chdir(saved_cwd)
 
