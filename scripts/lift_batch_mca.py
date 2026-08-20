@@ -406,6 +406,8 @@ def process_entry(
             _conftest.CFLAGS = merged_cflags
             _lfm.CFLAGS = merged_cflags
 
+            print(f"  CFLAGS: {' '.join(merged_cflags)}")
+
             reports = _run_pipeline(
                 source=source_path,
                 output_dir=source_output_dir,
@@ -427,7 +429,15 @@ def process_entry(
         return source_stem, build_dir, report_dir, source_path
         
     except Exception as e:
-        print(f"  FAIL: {str(e)}")
+        error_msg = str(e)
+        print(f"  FAIL: {error_msg}")
+        # Show truncated stderr for compilation errors
+        if "failed" in error_msg.lower():
+            lines = error_msg.split("\n")
+            for line in lines[:10]:
+                print(f"    {line}")
+            if len(lines) > 10:
+                print(f"    ... ({len(lines) - 10} more lines)")
         log_error(log_fh, entry_label, "processing failed", None)
         return None
 

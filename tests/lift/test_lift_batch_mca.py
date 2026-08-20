@@ -263,6 +263,70 @@ class TestExtractEntryCflags:
         assert result == []
 
 
+class TestCflagsPassthrough:
+    """Test that entry CFLAGS are properly passed to _run_pipeline."""
+    
+    def test_cflags_merged_with_entry_flags(self, monkeypatch, tmp_dir):
+        """Test that entry flags are merged into CFLAGS during processing."""
+        import conftest as _conftest
+        import lift_fragment_mca as _lfm
+        
+        original_cflags = ["-target", "aarch64-linux-gnu", "-O2"]
+        _conftest.CFLAGS = list(original_cflags)
+        _lfm.CFLAGS = list(original_cflags)
+        
+        captured_cflags = []
+        
+        def mock_run_pipeline(source, output_dir, **kwargs):
+            # Capture what CFLAGS is at the time _run_pipeline executes
+            captured_cflags.extend(_conftest.CFLAGS)
+            raise RuntimeError("stop here")
+        
+        monkeypatch.setattr(tool, "_run_pipeline", mock_run_pipeline)
+        
+        # Create a source file
+        source = tmp_dir / "test.c"
+        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        
+        entry = {
+            "directory": str(tmp_dir),
+            "file": str(source),
+            "output": "test.o",
+            "arguments": [
+                "clang", "-target", "aarch64-linux-gnu", "-O2",
+                "-I/usr/local/include", "-DDEBUG=1",
+                "-c", str(source), "-o", "test.o",
+            ],
+        }
+        args = MagicMock()
+        args.arm_lifter = "/usr/bin/true"
+        args.cc = None
+        args.output_dir = tmp_dir / "output"
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        args.mcpu = "generic"
+        args.mattr = ""
+        args.mca_iterations = 100
+        args.min_source_instructions = 2
+        args.min_target_instructions = 2
+        args.function = None
+        args.write_md = False
+        
+        log_fh = open(tmp_dir / "log.txt", "w")
+        tool.process_entry(entry, args, tmp_dir, log_fh, 0, 1)
+        log_fh.close()
+        
+        # Verify entry flags were merged
+        assert "-I/usr/local/include" in captured_cflags
+        assert "-DDEBUG=1" in captured_cflags
+        # Verify original CFLAGS are still there
+        assert "-target" in captured_cflags
+        assert "-O2" in captured_cflags
+        
+        # Verify CFLAGS are restored after processing
+        assert _conftest.CFLAGS == original_cflags
+        assert _lfm.CFLAGS == original_cflags
+
+
 class TestIsCc1Entry:
     """Test is_cc1_entry."""
     
