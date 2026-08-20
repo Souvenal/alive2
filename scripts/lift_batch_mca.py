@@ -292,7 +292,7 @@ def _compile_arm64_obj(src: Path, workdir: Path, extra_cflags: List[str] | None 
     vm_src = _to_vm_path(src)
     vm_output = _to_vm_path(output)
     r = run_in_vm(
-        [CLANG] + CFLAGS + (extra_cflags or [])
+        [CLANG] + _conftest.CFLAGS + (extra_cflags or [])
         + ["-c", vm_src, "-o", vm_output]
     )
     if r.returncode != 0:
