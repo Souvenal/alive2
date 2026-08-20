@@ -350,6 +350,88 @@ the cross-side instruction evidence. Gray nodes represent unmatched source
 blocks, unmatched target blocks, or source instructions without direct target
 block evidence.
 
+### Batch Lift and MCA Analysis
+
+`scripts/lift_batch_mca.py` integrates the batch-processing capability of
+`lift_compile_commands.py` with the full `lift_fragment_mca.py` workflow.
+It reads a `compile_commands.json`, processes every unique source file
+through the complete lift → recompile → MCA-analysis pipeline, and writes
+structured reports into an output directory.
+
+```bash
+cd /Users/mac/Projects/alive2
+
+# Basic usage
+uv run python scripts/lift_batch_mca.py /path/to/compile_commands.json
+
+# Specify output directory
+uv run python scripts/lift_batch_mca.py cc.json -o /tmp/batch-output
+
+# Dry-run: validate entries and print commands without executing
+uv run python scripts/lift_batch_mca.py cc.json --dry-run
+
+# Generate Markdown reports alongside JSON
+uv run python scripts/lift_batch_mca.py cc.json --write-md
+
+# Analyze a specific function only
+uv run python scripts/lift_batch_mca.py cc.json --function main
+
+# Custom MCA parameters
+uv run python scripts/lift_batch_mca.py cc.json \
+    --mca-iterations 500 \
+    --min-source-instructions 3 \
+    --min-target-instructions 3 \
+    --mcpu cortex-x2 --mattr "+neon"
+
+# Override compiler (bypasses clang validation)
+uv run python scripts/lift_batch_mca.py cc.json \
+    --cc="clang-20 -target aarch64-linux-gnu"
+```
+
+**Linux** requires `LLVM_VERSION` or `LLVM_BIN` (same as the test suite):
+
+```bash
+export LLVM_VERSION=20
+uv run python scripts/lift_batch_mca.py cc.json
+```
+
+The script validates that all `compile_commands.json` entries use clang
+(`arm-lifter` requires `-emit-llvm`). Non-clang entries are rejected with
+a clear error unless `--cc` is provided to override the compiler.
+
+Output structure:
+
+```
+output/
+├── <source_stem>/
+│   ├── build/
+│   │   ├── <stem>.o                # compiled ARM64 object
+│   │   ├── <stem>.bc               # LLVM bitcode
+│   │   ├── <stem>.ll               # source IR (with debug info)
+│   │   ├── <stem>.nodbg.ll         # source IR (no debug info)
+│   │   ├── <stem>.lifted.ll        # lifted IR from arm-lifter
+│   │   ├── <stem>.lift.log         # arm-lifter stdout/stderr
+│   │   ├── <stem>.asm-map.json     # instruction correlation map
+│   │   ├── <stem>.lifted_x86_64    # x86_64 recompiled binary
+│   │   ├── <stem>.lifted.arm64.o   # ARM64 recompiled object
+│   │   ├── <stem>_arm64            # ARM64 reference binary
+│   │   ├── <stem>.nodbg.s          # source ARM assembly
+│   │   └── <stem>.lifted.s         # lifted ARM assembly
+│   └── report/
+│       ├── <stem>.<fn>.fragment-mca.json          # all fragments (ARM64)
+│       ├── <stem>.<fn>.fragment-mca-arm-improved.json
+│       ├── <stem>.<fn>.fragment-mca-x64.json      # all fragments (x86_64)
+│       ├── <stem>.<fn>.fragment-mca-x64-improved.json
+│       └── <stem>.improved-summary.txt
+├── batch-summary.txt     # aggregated summary across all entries
+└── batch_errors.log      # per-entry error details
+```
+
+Each source file gets its own subdirectory so parallel runs do not
+interfere. Entries that share the same source file are deduplicated.
+Errors are logged and do not abort the batch; the final summary reports
+success/failure counts and lists improved fragments found.
+
 ## Adding a new test case
 
 1. Put `<name>.c` into `cases/`

@@ -54,6 +54,19 @@ CFLAGS = os.environ.get(
     "CFLAGS", "-target aarch64-linux-gnu -fno-sanitize=all -O2"
 ).split()
 
+# LLVM tool commands (resolved via llvm_tool at import time).
+# These are needed by scripts that import from conftest outside pytest.
+try:
+    CLANG = llvm_tool("clang")
+    LLC = llvm_tool("llc")
+    LLVM_DIS = llvm_tool("llvm-dis")
+except ToolchainError:
+    # On hosts where the LLVM toolchain is not configured (e.g. CI without
+    # LLVM_VERSION), defer resolution to runtime calls.
+    CLANG = "clang"
+    LLC = "llc"
+    LLVM_DIS = "llvm-dis"
+
 # Timeouts
 RUN_TIMEOUT = 60  # seconds
 
